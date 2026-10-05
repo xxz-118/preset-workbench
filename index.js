@@ -81,7 +81,7 @@ const UPDATE_RELEASES_LIST_API = `https://api.github.com/repos/${UPDATE_REPO}/re
 const UPDATE_RELEASES_URL = `https://github.com/${UPDATE_REPO}/releases`;
 
 /** 本地版本兜底值；正常情况下读的是 manifest.json 的 version，两者需保持一致。 */
-const EXTENSION_VERSION_FALLBACK = '1.3.2';
+const EXTENSION_VERSION_FALLBACK = '1.3.3';
 
 /**
  * 调用酒馆更新接口时用的扩展名。
@@ -93,6 +93,9 @@ const UPDATE_NAME = EXTENSION_PATH.replace('third-party', '');
 
 /** 自动检查更新的最短间隔：同一版本 24 小时内只请求一次 GitHub。 */
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/** 预设名同时是磁盘上的文件名，所以这些字符必须挡在输入阶段。 */
+const INVALID_PRESET_NAME_CHARS = /[\\/:*?"<>|]/;
 
 const state = {
     /** @type {any} 最近一次 /api/settings/get 的原始响应 */
@@ -503,6 +506,173 @@ function fixSelectionAfterLoss(manager, goneName) {
     return manager.getSelectedPresetName();
 }
 
+/**
+ * 收敛非 keyed 类型的内存数组。
+ *
+ * 酒馆自身的 deletePreset 在 openai / kobold / novel 这三个类型下，只从
+ * name->index 映射里删键，被删的对象仍然留在 presets 数组里形成一个空洞。
+ * 后果不只是内存占着不放：下一次删除时，deletePreset 会用映射里的新 index
+ * 去 `option[value=...]` 里找元素，而下拉框里还留着按旧索引编号的 option，
+ * 于是可能移除错的那一个。
+ *
+ * 刷新页面会自然重建，但本次会话内必须手动收敛。
+ * presets 与 preset_names 都是酒馆的模块级对象，所以原地改写以保持引用不变。
+ */
+function compactPresetMemory(manager) {
+    try {
+        const { presets, preset_names } = manager.getPresetList();
+
+        // keyed 类型（textgenerationwebui 与进阶模板）酒馆自己已经 splice 过，
+        // 它们的 preset_names 是数组；这里只处理 name->index 对象的情形。
+        if (!Array.isArray(presets) || !preset_names || typeof preset_names !== 'object' || Array.isArray(preset_names)) {
+            return;
+        }
+
+        const names = Object.keys(preset_names);
+        if (names.length === presets.length) {
+            return; // 没有空洞
+        }
+
+        const rebuilt = [];
+        const nextNames = {};
+        const used = new Set();
+
+        for (const presetName of names) {
+            const index = preset_names[presetName];
+            if (typeof index !== 'number' || index < 0 || index >= presets.length || used.has(index)) {
+                continue;
+            }
+            used.add(index);
+            nextNames[presetName] = rebuilt.length;
+            rebuilt.push(presets[index]);
+        }
+
+        for (const key of Object.keys(preset_names)) {
+            delete preset_names[key];
+        }
+        Object.assign(preset_names, nextNames);
+
+        presets.length = 0;
+        for (const preset of rebuilt) {
+            presets.push(preset);
+        }
+
+        syncSelectValues(manager, preset_names);
+    } catch (error) {
+        console.warn(LOG_PREFIX, '收敛预设内存时出错（不影响已完成的删除）', error);
+    }
+}
+
+/**
+ * 把下拉框 option 的 value 对齐到当前映射，但不改变选中项。
+ * 只处理名字确实在映射里的 option —— 酒馆自己往下拉框里塞过额外项
+ * （例如 kobold 的「GUI KoboldAI Settings」），那些必须原样保留。
+ */
+function syncSelectValues(manager, preset_names) {
+    const select = manager.select;
+    if (!select || !select.length) {
+        return;
+    }
+    select.find('option').each(function () {
+        const label = jq(this).text();
+        if (Object.hasOwn(preset_names, label)) {
+            jq(this).attr('value', String(preset_names[label]));
+        }
+    });
+}
+
+/**
+ * 遍历所有「按预设名索引」的数组，对每个调用 handler。
+ *
+ * 预设文件本身是自包含的：提示词、内嵌正则（extensions.regex_scripts）、
+ * Tavern Helper 脚本（extensions.tavern_helper）都写在同一个 JSON 里，
+ * 文件被物理删除或改名，这些内容随之消失或迁移。
+ *
+ * 但有三份索引是独立存在 settings.json 里、各自按预设名记录的：
+ *   - extension_settings.preset_allowed_regex[apiId]            允许哪些预设的内嵌正则生效
+ *   - extension_settings.tavern_helper.script.enabled.presets   脚本对哪些预设启用
+ *   - extension_settings.tavern_helper.script.popuped.presets   弹窗提示记录
+ *
+ * regex 扩展与 Tavern Helper 都监听了 PRESET_DELETED / PRESET_RENAMED_BEFORE
+ * 会自行处理，但前提是它们处于启用状态。这里是同语义的兜底：只动这一个名字。
+ *
+ * @param {(list: string[]) => boolean} handler 返回 true 表示确实改动了
+ * @returns {string[]} 被改动的索引标签，便于日志核对
+ */
+function forEachPresetNameIndex(apiId, handler) {
+    const applied = [];
+
+    let settings;
+    try {
+        settings = ctx().extensionSettings;
+    } catch (error) {
+        return applied;
+    }
+    if (!settings || typeof settings !== 'object') {
+        return applied;
+    }
+
+    const visit = (list, label) => {
+        if (!Array.isArray(list)) {
+            return;
+        }
+        try {
+            if (handler(list)) {
+                applied.push(label);
+            }
+        } catch (error) {
+            console.warn(LOG_PREFIX, `处理 ${label} 时出错`, error);
+        }
+    };
+
+    const allowedMap = settings.preset_allowed_regex;
+    if (allowedMap && typeof allowedMap === 'object' && !Array.isArray(allowedMap)) {
+        visit(allowedMap[apiId], `preset_allowed_regex.${apiId}`);
+    }
+
+    const scriptState = settings.tavern_helper?.script;
+    if (scriptState && typeof scriptState === 'object') {
+        visit(scriptState.enabled?.presets, 'tavern_helper.enabled.presets');
+        visit(scriptState.popuped?.presets, 'tavern_helper.popuped.presets');
+    }
+
+    return applied;
+}
+
+/** 删除预设后清掉它的名字引用。幂等。 */
+function purgePresetNameReferences(apiId, name) {
+    if (!apiId || !name) {
+        return [];
+    }
+    return forEachPresetNameIndex(apiId, (list) => {
+        const index = list.indexOf(name);
+        if (index === -1) {
+            return false;
+        }
+        list.splice(index, 1);
+        return true;
+    });
+}
+
+/** 改名后把旧名字替换成新名字 —— 注意不是删掉，否则新名字会失去原有授权。幂等。 */
+function renamePresetNameReferences(apiId, oldName, newName) {
+    if (!apiId || !oldName || !newName || oldName === newName) {
+        return [];
+    }
+    return forEachPresetNameIndex(apiId, (list) => {
+        const index = list.indexOf(oldName);
+        if (index === -1) {
+            return false;
+        }
+        if (list.includes(newName)) {
+            list.splice(index, 1); // 新名字已经在列表里，去掉旧的重复项
+        } else {
+            list[index] = newName;
+        }
+        return true;
+    });
+}
+
 // ───────────────────────── 本地视图维护 ─────────────────────────
 
 /**
@@ -562,8 +732,35 @@ function upsertEntryLocal(name, data, previousName = null) {
     syncSnapshotEntry(currentType(), name, data, previousName);
 }
 
+/** 从内存快照里移除一条，让标签页角标与列表立刻一致。 */
+function removeSnapshotEntry(type, name) {
+    if (!state.snapshot) {
+        return;
+    }
+    const list = Array.isArray(state.snapshot[type.contentsKey]) ? state.snapshot[type.contentsKey] : null;
+    if (!list) {
+        return;
+    }
+
+    if (isAdvancedType(type)) {
+        const index = list.findIndex((item) => item && item.name === name);
+        if (index >= 0) {
+            list.splice(index, 1);
+        }
+        return;
+    }
+
+    const names = state.snapshot[type.namesKey];
+    const index = Array.isArray(names) ? names.indexOf(name) : -1;
+    if (index >= 0) {
+        names.splice(index, 1);
+        list.splice(index, 1);
+    }
+}
+
 function removeEntryLocal(name) {
     state.entries = state.entries.filter((e) => e.name !== name);
+    removeSnapshotEntry(currentType(), name);
 }
 
 // ───────────────────────────── 窗口管理 ─────────────────────────────
@@ -1109,22 +1306,30 @@ async function opUpdate(type, entry) {
     toastr.success(`已用当前面板设置覆盖「${entry.name}」，当前预设未改变`);
 }
 
-/** 重命名：先写新文件，确认成功后再删旧文件 */
+/** 重命名：先广播改名意图，再写新文件，确认成功后才删旧文件 */
 async function opRename(type, entry) {
     const manager = getManager(type.apiId);
     const unit = unitOf(type);
+    const oldName = entry.name;
 
     const newNameRaw = await ctx().Popup.show.input(
         `重命名${unit}`,
-        `当前名称：<b>${escapeHtml(entry.name)}</b><br>请输入新名称：`,
-        entry.name,
+        `当前名称：<b>${escapeHtml(oldName)}</b><br>请输入新名称：`,
+        oldName,
     );
     const newName = (newNameRaw ?? '').trim();
 
-    if (!newName || newName === entry.name) {
+    if (!newName || newName === oldName) {
         return;
     }
-    if (diskNameSet(type).has(newName)) {
+    if (INVALID_PRESET_NAME_CHARS.test(newName)) {
+        toastr.warning('名字里不能包含 \\ / : * ? " < > | 这些字符 —— 预设名同时是磁盘上的文件名。');
+        return;
+    }
+
+    const taken = diskNameSet(type);
+    const takenLower = new Set([...taken].map((n) => n.toLowerCase()));
+    if (taken.has(newName) || takenLower.has(newName.toLowerCase())) {
         toastr.warning(`磁盘上已经存在名为「${newName}」的${unit}`);
         return;
     }
@@ -1134,12 +1339,23 @@ async function opRename(type, entry) {
         data.name = newName;
     }
 
+    // 先广播改名意图：regex 扩展与 Tavern Helper 靠它把按预设名存的索引
+    // 从旧名换成新名（与酒馆原生重命名流程一致，preset-manager.js:1062）
+    await eventSource.emit(event_types.PRESET_RENAMED_BEFORE, { apiId: type.apiId, oldName, newName });
+
     await manager.savePreset(newName, data, { skipUpdate: true });
     syncMemory(manager, newName, data);
     ensureSelectOption(manager, newName);
 
-    const wasCurrent = manager.getSelectedPresetName() === entry.name;
-    const deleted = await manager.deletePreset(entry.name);
+    const wasCurrent = manager.getSelectedPresetName() === oldName;
+    const deleted = await manager.deletePreset(oldName);
+
+    // 旧文件消失，收敛内存数组（见 compactPresetMemory 的说明）
+    compactPresetMemory(manager);
+
+    // 兜底：那两个扩展只有启用时才会响应上面的事件。
+    // 是「换成新名字」而不是「删掉」，否则新名字会丢掉原有的正则授权。
+    const renamed = renamePresetNameReferences(type.apiId, oldName, newName);
 
     if (wasCurrent) {
         const { preset_names } = manager.getPresetList();
@@ -1147,16 +1363,20 @@ async function opRename(type, entry) {
         if (value !== undefined) {
             manager.selectPreset(value);
         } else {
-            fixSelectionAfterLoss(manager, entry.name);
+            fixSelectionAfterLoss(manager, oldName);
         }
     }
 
+    await eventSource.emit(event_types.PRESET_RENAMED, { apiId: type.apiId, oldName, newName });
+
     saveSettingsDebounced();
-    upsertEntryLocal(newName, data, entry.name);
+    upsertEntryLocal(newName, data, oldName);
     repaint();
 
+    console.info(LOG_PREFIX, `已重命名「${oldName}」→「${newName}」`, renamed.length ? `并同步了 ${renamed.join('、')}` : '（无需额外同步）');
+
     if (!deleted) {
-        toastr.warning(`新${unit}「${newName}」已保存，但旧文件「${entry.name}」没删掉，请手动清理`);
+        toastr.warning(`新${unit}「${newName}」已保存，但旧文件「${oldName}」没删掉，请手动清理`);
     } else {
         toastr.success(`已重命名为「${newName}」`);
     }
@@ -1230,6 +1450,9 @@ async function opDelete(type, entry) {
         return;
     }
 
+    // 酒馆自身的 deletePreset 会在内存数组里留空洞，这里立刻收敛
+    compactPresetMemory(manager);
+
     if (wasCurrent) {
         const next = fixSelectionAfterLoss(manager, entry.name);
         if (next === null) {
@@ -1237,12 +1460,19 @@ async function opDelete(type, entry) {
         }
     }
 
+    // 广播给其他扩展（酒馆自身的删除流程也这么做）：
+    // regex 扩展与 Tavern Helper 都靠这个事件清理自己按预设名存的索引。
+    await eventSource.emit(event_types.PRESET_DELETED, { apiId: type.apiId, name: entry.name });
+
+    // 兜底：那两个扩展只在启用状态下才注册上面的监听器。
+    // 它们各有一份按预设名的数组存在 settings.json 里，禁用时删除就会留下孤儿。
+    const purged = purgePresetNameReferences(type.apiId, entry.name);
+
     saveSettingsDebounced();
     removeEntryLocal(entry.name);
     repaint();
 
-    // 广播给其他扩展（酒馆自身的删除流程也这么做）
-    await eventSource.emit(event_types.PRESET_DELETED, { apiId: type.apiId, name: entry.name });
+    console.info(LOG_PREFIX, `已删除「${entry.name}」`, purged.length ? `并清理了 ${purged.join('、')}` : '（无需额外清理）');
     toastr.success(`已删除「${entry.name}」`);
 }
 

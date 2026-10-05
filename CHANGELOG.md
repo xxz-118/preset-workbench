@@ -5,6 +5,22 @@ Release，因此这里写的内容就是用户在浮窗里点「更新内容」�
 
 ---
 
+## v1.3.3
+
+### 说明
+预设文件本体是自包含的：提示词、内嵌正则（`extensions.regex_scripts`）、Tavern Helper 脚本（`extensions.tavern_helper`）、第三方扩展配置，全都写在同一个 JSON 里。删除时文件被物理移除，它们随之一起消失，不存在残留。本版修的是文件之外那几处**按预设名单独存着**的索引。
+
+### 修复
+- **改名后内嵌正则的授权会失联。** 酒馆把「允许哪条预设的内嵌正则生效」按预设名单独存在 `settings.json` 里（`preset_allowed_regex`）。regex 扩展与 Tavern Helper 都靠 `PRESET_RENAMED_BEFORE` 事件把旧名字换成新名字，而本扩展的重命名流程没有广播这个事件 —— 后果是改完名新预设的内嵌正则不再生效。现在补上了，与酒馆原生重命名流程一致。
+- **删除后内存数组留下空洞。** 酒馆自身的 `deletePreset` 在 openai / kobold / novel 三个类型下只删名字映射、不在数组里删元素。后果不只是占着内存：下一次删除时按映射取到的新索引会和下拉框里按旧索引编号的 option 对不上，可能移除错的那一个。现在每次删除后立即收敛，并同步下拉框 option 的值。
+- **删除后标签页的数量角标不刷新。** 列表用的是刚读取的数据，角标读的却是内存快照，删完会残留旧数字。
+
+### 新增
+- **兜底清理按预设名的外部索引。** regex 扩展与 Tavern Helper 都监听 `PRESET_DELETED` 自行清理，但只在自身启用时才会注册监听器；禁用状态下删除就会留下孤儿。现在删除时会以同样语义兜底处理这三处：`preset_allowed_regex[apiId]`、`tavern_helper.script.enabled.presets`、`tavern_helper.script.popuped.presets`。幂等，只移除这一个确切的名字，不碰任何其它数据。
+- 重命名时校验新名字是否含文件名非法字符（`\ / : * ? " < > |`），并增加忽略大小写的重名检查（Windows 文件名不区分大小写）。
+
+---
+
 ## v1.3.2
 
 ### 新增
