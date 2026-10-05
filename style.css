@@ -1,0 +1,169 @@
+/* 预设工作台 —— 命名空间统一前缀 pw-，避免污染酒馆自身样式 */
+
+.preset-workbench .pw-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+
+.preset-workbench .pw-row-toolbar {
+    flex-wrap: wrap;
+}
+
+.preset-workbench .pw-label {
+    flex: 0 0 auto;
+    opacity: 0.8;
+    font-size: 0.9em;
+}
+
+.preset-workbench .pw-type-select {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 180px;
+}
+
+.preset-workbench .pw-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.9em;
+    padding: 2px 8px;
+    flex: 0 0 auto;
+}
+
+.preset-workbench .pw-search {
+    flex: 1 1 auto;
+    width: auto;
+}
+
+.preset-workbench .pw-hidden-file {
+    display: none !important;
+}
+
+.preset-workbench .pw-status {
+    font-size: 0.85em;
+    opacity: 0.8;
+    margin: 4px 0 6px;
+    line-height: 1.5;
+}
+
+.preset-workbench .pw-warn {
+    color: var(--SmartThemeWarningColor, #e0a030);
+    font-size: 0.95em;
+}
+
+.preset-workbench .pw-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 50vh;
+    overflow-y: auto;
+    padding-right: 2px;
+}
+
+.preset-workbench .pw-empty {
+    opacity: 0.6;
+    font-size: 0.9em;
+    padding: 8px 2px;
+}
+
+.preset-workbench .pw-item {
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+    border-radius: 6px;
+    padding: 6px 8px;
+    background-color: var(--black30a, rgba(0, 0, 0, 0.18));
+    transition: border-color 0.15s ease;
+}
+
+.preset-workbench .pw-item:hover {
+    border-color: var(--SmartThemeQuoteColor, #888);
+}
+
+.preset-workbench .pw-item.pw-is-current {
+    border-color: var(--SmartThemeQuoteColor, #6aa9ff);
+    box-shadow: inset 0 0 0 1px var(--SmartThemeQuoteColor, #6aa9ff);
+}
+
+.preset-workbench .pw-item-head {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.preset-workbench .pw-name {
+    font-weight: 600;
+    word-break: break-all;
+}
+
+.preset-workbench .pw-badge {
+    font-size: 0.72em;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    padding: 0 6px;
+    opacity: 0.85;
+    flex: 0 0 auto;
+}
+
+.preset-workbench .pw-badge-current {
+    color: var(--SmartThemeQuoteColor, #6aa9ff);
+}
+
+.preset-workbench .pw-badge-broken {
+    color: var(--SmartThemeWarningColor, #e0a030);
+}
+
+.preset-workbench .pw-meta {
+    font-size: 0.78em;
+    opacity: 0.65;
+    word-break: break-all;
+}
+
+.preset-workbench .pw-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 5px;
+}
+
+.preset-workbench .pw-actions .menu_button {
+    font-size: 0.82em;
+    padding: 1px 7px;
+    margin: 0;
+}
+
+.preset-workbench .pw-actions .pw-danger {
+    color: var(--SmartThemeWarningColor, #ff7a7a);
+    border-color: currentColor;
+}
+
+.preset-workbench .pw-actions .pw-disabled {
+    opacity: 0.4;
+    pointer-events: none;
+}
+
+.preset-workbench .pw-hint {
+    margin-top: 8px;
+    font-size: 0.8em;
+    opacity: 0.7;
+    line-height: 1.5;
+}
+
+.preset-workbench .pw-hint code {
+    font-size: 1em;
+}
+
+.preset-workbench .pw-spin {
+    animation: pw-rotate 1s linear infinite;
+}
+
+@keyframes pw-rotate {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}

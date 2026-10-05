@@ -1,0 +1,41 @@
+<div class="preset-workbench inline-drawer">
+    <div class="inline-drawer-toggle inline-drawer-header">
+        <b>预设工作台</b>
+        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+    </div>
+    <div class="inline-drawer-content">
+
+        <div class="pw-row pw-row-toolbar">
+            <label class="pw-label" for="pw_type">预设类型</label>
+            <select id="pw_type" class="text_pole pw-type-select"></select>
+        </div>
+
+        <div class="pw-row pw-row-toolbar">
+            <div id="pw_refresh" class="menu_button pw-btn" title="重新扫描磁盘上的预设目录，拿到最新列表">
+                <i class="fa-solid fa-rotate"></i><span>刷新</span>
+            </div>
+            <div id="pw_import" class="menu_button pw-btn" title="从本地 JSON 文件导入预设">
+                <i class="fa-solid fa-file-import"></i><span>导入</span>
+            </div>
+            <div id="pw_export_all" class="menu_button pw-btn" title="把当前类型的全部预设打包成一个 JSON 文件下载">
+                <i class="fa-solid fa-file-export"></i><span>全部导出</span>
+            </div>
+            <input id="pw_import_file" class="pw-hidden-file" type="file" accept=".json,application/json" multiple="multiple" />
+        </div>
+
+        <div class="pw-row">
+            <input id="pw_search" class="text_pole pw-search" type="text" placeholder="按名称过滤…" />
+        </div>
+
+        <div id="pw_status" class="pw-status">正在读取…</div>
+
+        <div id="pw_list" class="pw-list"></div>
+
+        <div class="pw-hint">
+            <i class="fa-solid fa-circle-info"></i>
+            磁盘是唯一真相：预设名就是用户目录下对应的 <code>.json</code> 文件名（进阶模板取文件内容里的 <code>name</code>）。
+            本面板直接读写这些文件，所以「覆盖更新」和「删除」可以对列表里的任意一条生效，不必先把它切换成当前预设。
+        </div>
+
+    </div>
+</div>
