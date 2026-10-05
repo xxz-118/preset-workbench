@@ -1006,6 +1006,11 @@
     opacity: 0.6;
 }
 
+/* 通用隐藏（比 jQuery 的 hide/show 更安全，不会把 inline-flex 压成 inline） */
+.pw-hidden {
+    display: none !important;
+}
+
 /* 紧凑模式下的更新提示条 */
 .pw-window.pw-compact .pw-update-banner {
     padding: 10px 12px;

@@ -81,7 +81,7 @@ const UPDATE_RELEASES_API = `https://api.github.com/repos/${UPDATE_REPO}/release
 const UPDATE_RELEASES_URL = `https://github.com/${UPDATE_REPO}/releases`;
 
 /** 本地版本兜底值；正常情况下读的是 manifest.json 的 version，两者需保持一致。 */
-const EXTENSION_VERSION_FALLBACK = '1.3.0';
+const EXTENSION_VERSION_FALLBACK = '1.3.1';
 
 /**
  * 调用酒馆更新接口时用的扩展名。
@@ -116,10 +116,13 @@ const updateState = {
     localVersion: EXTENSION_VERSION_FALLBACK,
     /** @type {{version:string, notes:string, url:string, publishedAt:string}|null} */
     latest: null,
+    /** 酒馆服务端判定本地仓库落后于远端 */
+    hostOutdated: false,
     checking: false,
     hasUpdate: false,
-    failed: false,
     notesOpen: false,
+    /** @type {string|null} 最近一次检查的错误说明 */
+    error: null,
 };
 
 // ───────────────────────────── 通用小工具 ─────────────────────────────
@@ -1488,18 +1491,63 @@ function readUpdateCache() {
     return cfg.update;
 }
 
-/** 把本地版本与缓存的远端版本对齐，算出是否该提示更新。 */
+/** 把本地版本与缓存的远端信息对齐，算出是否该提示更新。 */
 function syncUpdateState() {
     updateState.localVersion = localVersion();
 
     const cache = readUpdateCache();
     updateState.latest = cache.latest ?? null;
+    updateState.hostOutdated = cache.hostOutdated === true;
 
     const remoteVersion = cache.latest?.version;
-    const outdated = Boolean(remoteVersion) && compareVersions(remoteVersion, updateState.localVersion) > 0;
+    const releaseOutdated = Boolean(remoteVersion) && compareVersions(remoteVersion, updateState.localVersion) > 0;
+    const outdated = releaseOutdated || updateState.hostOutdated;
 
-    // 用户对该版本点过「不再提示」就静默；手动检查仍会显示结果
-    updateState.hasUpdate = outdated && cache.dismissed !== remoteVersion;
+    // 只有拿到确切版本号时才允许「不再提示这个版本」；纯 host 判断不能忽略，
+    // 否则用户会失去唯一的更新线索
+    updateState.hasUpdate = outdated && !(releaseOutdated && cache.dismissed === remoteVersion);
+}
+
+/**
+ * 通道一：问酒馆自己有没有新提交。
+ * /api/extensions/version 会在服务端对扩展目录执行 git fetch 再比对，
+ * 所以它不仅不限流，而且它的结论才真正代表「酒馆能不能更新成功」。
+ * 返回 null 表示这条通道不可用（目录不是 git 仓库、路径不对等）。
+ */
+async function checkHostUpdateAvailable() {
+    const attempts = [
+        { extensionName: UPDATE_NAME, global: false },
+        { extensionName: UPDATE_NAME, global: true },
+    ];
+
+    for (const body of attempts) {
+        let response;
+        try {
+            response = await fetch('/api/extensions/version', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify(body),
+            });
+        } catch {
+            continue;
+        }
+
+        if (response.status === 404 || response.status === 403) {
+            continue;
+        }
+        if (!response.ok) {
+            throw new Error(`酒馆返回 ${response.status}`);
+        }
+
+        const data = await response.json();
+        return {
+            isUpToDate: Boolean(data.isUpToDate),
+            commit: String(data.currentCommitHash ?? ''),
+            remoteUrl: String(data.remoteUrl ?? ''),
+        };
+    }
+
+    return null;
 }
 
 /**
@@ -1513,6 +1561,11 @@ async function fetchLatestRelease() {
 
     if (response.status === 404) {
         return null; // 仓库还没有发布任何 release
+    }
+    if (response.status === 403 || response.status === 429) {
+        // 未认证的 GitHub API 限额是每小时 60 次（按 IP）。正常使用碰不到，
+        // 因为同一版本 24 小时内只查一次。
+        throw new Error('GitHub 接口限流，稍后再试');
     }
     if (!response.ok) {
         throw new Error(`GitHub 返回 ${response.status}`);
@@ -1528,7 +1581,11 @@ async function fetchLatestRelease() {
 }
 
 /**
- * 检查更新。
+ * 检查更新。两条通道互补，任一条成功就能得出「有更新」的结论：
+ *  1. 酒馆自己的 /api/extensions/version —— 服务端 git fetch 后比对，不限流，
+ *     而且它才真正代表「酒馆能不能更新成功」。
+ *  2. GitHub Releases —— 拿到版本号和更新说明，但可能被限流或网络阻断。
+ *
  * @param {boolean} force 忽略 24 小时间隔（手动触发）
  * @param {boolean} silent 静默模式：不弹提示，只更新界面
  */
@@ -1538,40 +1595,58 @@ async function checkForUpdate({ force = false, silent = true } = {}) {
     }
 
     const cache = readUpdateCache();
-    const lastChecked = Number(cache.checkedAt) || 0;
 
-    if (!force && Date.now() - lastChecked < UPDATE_CHECK_INTERVAL_MS) {
+    if (!force && Date.now() - (Number(cache.checkedAt) || 0) < UPDATE_CHECK_INTERVAL_MS) {
         syncUpdateState();
         renderUpdateUi();
         return;
     }
 
     updateState.checking = true;
-    updateState.failed = false;
+    updateState.error = null;
     renderUpdateUi();
 
+    const problems = [];
+
     try {
-        const release = await fetchLatestRelease();
-        cache.checkedAt = Date.now();
-        if (release) {
-            cache.latest = release;
+        // 通道一：酒馆服务端
+        try {
+            const hostResult = await checkHostUpdateAvailable();
+            if (hostResult) {
+                cache.hostOutdated = !hostResult.isUpToDate;
+            } else {
+                problems.push('酒馆端：没能定位到扩展目录');
+            }
+        } catch (error) {
+            problems.push(`酒馆端：${error?.message ?? error}`);
+            console.warn(LOG_PREFIX, '酒馆端版本检查失败', error);
         }
+
+        // 通道二：GitHub Releases
+        try {
+            const release = await fetchLatestRelease();
+            if (release) {
+                cache.latest = release;
+            }
+        } catch (error) {
+            problems.push(`GitHub：${error?.message ?? error}`);
+            console.warn(LOG_PREFIX, 'GitHub Release 查询失败', error);
+        }
+
+        cache.checkedAt = Date.now();
+        updateState.error = problems.length ? problems.join('；') : null;
         syncUpdateState();
 
         if (!silent) {
-            if (!release) {
-                toastr.info('仓库上还没有发布版本');
-            } else if (updateState.hasUpdate) {
-                toastr.success(`发现新版本 v${release.version}`);
+            if (updateState.hasUpdate) {
+                toastr.success(updateState.latest?.version
+                    ? `发现新版本 v${updateState.latest.version}`
+                    : '检测到有新提交可用');
+            } else if (problems.length >= 2) {
+                toastr.warning(`检查更新失败：${updateState.error}`);
             } else {
                 toastr.success(`已是最新版本 v${updateState.localVersion}`);
             }
-        }
-    } catch (error) {
-        console.warn(LOG_PREFIX, '检查更新失败', error);
-        updateState.failed = true;
-        if (!silent) {
-            toastr.warning(`检查更新失败：${error?.message ?? error}`);
         }
     } finally {
         updateState.checking = false;
@@ -1587,8 +1662,9 @@ function renderUpdateUi() {
     }
 
     const remoteVersion = updateState.latest?.version;
-    const outdated = Boolean(remoteVersion) && compareVersions(remoteVersion, updateState.localVersion) > 0;
-    const ignored = Boolean(remoteVersion) && readUpdateCache().dismissed === remoteVersion;
+    const releaseOutdated = Boolean(remoteVersion) && compareVersions(remoteVersion, updateState.localVersion) > 0;
+    const outdated = releaseOutdated || updateState.hostOutdated;
+    const ignored = releaseOutdated && readUpdateCache().dismissed === remoteVersion;
     const showBanner = outdated && !ignored;
 
     jq('#pw_btn_update')
@@ -1597,13 +1673,31 @@ function renderUpdateUi() {
         .toggleClass('pw-spin', updateState.checking);
 
     if (showBanner) {
-        jq('#pw_update_text').html(
-            `有新版本 <b>v${escapeHtml(remoteVersion)}</b> 可用，当前是 v${escapeHtml(updateState.localVersion)}。`
-            + (updateState.latest?.publishedAt
-                ? ` <span class="pw-update-date">发布于 ${escapeHtml(String(updateState.latest.publishedAt).slice(0, 10))}</span>`
-                : ''),
-        );
-        jq('#pw_update_notes').html(renderNotesHtml(updateState.latest?.notes));
+        const current = escapeHtml(updateState.localVersion);
+
+        if (remoteVersion) {
+            jq('#pw_update_text').html(
+                `有新版本 <b>v${escapeHtml(remoteVersion)}</b> 可用，当前是 v${current}。`
+                + (updateState.latest?.publishedAt
+                    ? ` <span class="pw-update-date">发布于 ${escapeHtml(String(updateState.latest.publishedAt).slice(0, 10))}</span>`
+                    : ''),
+            );
+        } else {
+            // 只有酒馆端判断出落后，GitHub 那侧没拿到 —— 仍然提示，只是没有版本说明
+            jq('#pw_update_text').html(`检测到有新提交可用（当前 v${current}），但没取到版本说明。`);
+        }
+
+        const hasNotes = Boolean(remoteVersion && updateState.latest?.notes);
+        if (hasNotes) {
+            jq('#pw_update_notes').html(renderNotesHtml(updateState.latest.notes));
+        } else {
+            jq('#pw_update_notes').html(
+                `<div class="pw-notes-empty">${escapeHtml(updateState.error
+                    ? `取更新说明失败：${updateState.error}`
+                    : '这个版本没有写更新说明。')}</div>`,
+            );
+        }
+        jq('#pw_btn_update_notes').toggleClass('pw-hidden', !hasNotes);
     } else {
         updateState.notesOpen = false;
     }
@@ -1615,7 +1709,7 @@ function renderUpdateUi() {
     jq('#pw_version')
         .toggleClass('pw-version-outdated', outdated)
         .attr('title', outdated
-            ? `当前 v${updateState.localVersion}，最新 v${remoteVersion}。点击检查更新`
+            ? `当前 v${updateState.localVersion}${remoteVersion ? `，最新 v${remoteVersion}` : ''}。点击检查更新`
             : `当前 v${updateState.localVersion}。点击检查更新`);
 }
 
