@@ -1,41 +1,55 @@
-<div class="preset-workbench inline-drawer">
-    <div class="inline-drawer-toggle inline-drawer-header">
-        <b>预设工作台</b>
-        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
-    </div>
-    <div class="inline-drawer-content">
+<div id="pw_root" class="pw-root">
+    <div id="pw_backdrop" class="pw-backdrop"></div>
 
-        <div class="pw-row pw-row-toolbar">
-            <label class="pw-label" for="pw_type">预设类型</label>
-            <select id="pw_type" class="text_pole pw-type-select"></select>
-        </div>
-
-        <div class="pw-row pw-row-toolbar">
-            <div id="pw_refresh" class="menu_button pw-btn" title="重新扫描磁盘上的预设目录，拿到最新列表">
-                <i class="fa-solid fa-rotate"></i><span>刷新</span>
+    <section id="pw_window" class="pw-window" role="dialog" aria-modal="true" aria-label="预设工作台">
+        <header id="pw_drag_handle" class="pw-header">
+            <div class="pw-header-title">
+                <span class="pw-header-glyph"><i class="fa-solid fa-sliders"></i></span>
+                <span class="pw-header-text">预设工作台</span>
+                <span id="pw_header_count" class="pw-header-count">0</span>
             </div>
-            <div id="pw_import" class="menu_button pw-btn" title="从本地 JSON 文件导入预设">
-                <i class="fa-solid fa-file-import"></i><span>导入</span>
+            <div class="pw-header-actions" data-no-drag="1">
+                <button type="button" id="pw_btn_refresh" class="pw-icon-btn" title="重新扫描磁盘上的预设目录">
+                    <i class="fa-solid fa-rotate"></i>
+                </button>
+                <button type="button" id="pw_btn_recenter" class="pw-icon-btn" title="恢复窗口的默认位置与大小">
+                    <i class="fa-solid fa-window-restore"></i>
+                </button>
+                <button type="button" id="pw_btn_close" class="pw-icon-btn pw-icon-btn-close" title="关闭（Esc）">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
             </div>
-            <div id="pw_export_all" class="menu_button pw-btn" title="把当前类型的全部预设打包成一个 JSON 文件下载">
-                <i class="fa-solid fa-file-export"></i><span>全部导出</span>
+        </header>
+
+        <div class="pw-content">
+            <nav id="pw_tabs" class="pw-tabs" role="tablist"></nav>
+
+            <div class="pw-toolbar">
+                <div class="pw-search">
+                    <i class="fa-solid fa-magnifying-glass pw-search-icon"></i>
+                    <input type="text" id="pw_search" class="pw-search-input" placeholder="搜索预设名…" autocomplete="off" spellcheck="false" />
+                    <button type="button" id="pw_search_clear" class="pw-search-clear" title="清空搜索">
+                        <i class="fa-solid fa-circle-xmark"></i>
+                    </button>
+                </div>
+                <div class="pw-toolbar-actions">
+                    <button type="button" id="pw_btn_import" class="pw-btn pw-btn-ghost">
+                        <i class="fa-solid fa-file-import"></i><span>导入</span>
+                    </button>
+                    <button type="button" id="pw_btn_export_all" class="pw-btn pw-btn-ghost">
+                        <i class="fa-solid fa-file-export"></i><span>全部导出</span>
+                    </button>
+                    <input type="file" id="pw_import_file" class="pw-hidden-file" accept=".json,application/json" multiple="multiple" />
+                </div>
             </div>
-            <input id="pw_import_file" class="pw-hidden-file" type="file" accept=".json,application/json" multiple="multiple" />
+
+            <div id="pw_list" class="pw-list"></div>
         </div>
 
-        <div class="pw-row">
-            <input id="pw_search" class="text_pole pw-search" type="text" placeholder="按名称过滤…" />
-        </div>
+        <footer class="pw-footer">
+            <div id="pw_status" class="pw-status">正在读取…</div>
+        </footer>
 
-        <div id="pw_status" class="pw-status">正在读取…</div>
-
-        <div id="pw_list" class="pw-list"></div>
-
-        <div class="pw-hint">
-            <i class="fa-solid fa-circle-info"></i>
-            磁盘是唯一真相：预设名就是用户目录下对应的 <code>.json</code> 文件名（进阶模板取文件内容里的 <code>name</code>）。
-            本面板直接读写这些文件，所以「覆盖更新」和「删除」可以对列表里的任意一条生效，不必先把它切换成当前预设。
-        </div>
-
-    </div>
+        <div id="pw_resize_handle" class="pw-resize-handle" title="拖动调整窗口大小"></div>
+    </section>
 </div>

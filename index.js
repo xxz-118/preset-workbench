@@ -1,10 +1,9 @@
 /**
  * 预设工作台 (Preset Workbench) —— SillyTavern UI 扩展
  *
- * 目的：脱离酒馆原生「必须先切换成当前预设，才能更新 / 删除它」的限制。
- * 打开面板即列出当前类型的全部预设，每一行都有独立管理按钮。
+ * 形态：一个可从酒馆「扩展菜单（魔杖图标）」打开的可拖动浮窗，不占用扩展设置页。
  *
- * ── 设计依据（SillyTavern 1.18.0，逐条对照源码核对过）──────────────────────
+ * ── 数据层设计依据（SillyTavern 1.18.0，逐条对照源码核对）─────────────────
  *  1. 磁盘是预设的唯一真相。每次页面加载由 POST /api/settings/get 扫描用户目录重建内存列表：
  *       src/endpoints/settings.js:219   返回 openai_setting_names / openai_settings / ...
  *       src/endpoints/settings.js:92    readPresetsFromDirectory —— 预设名 = 文件名去扩展名
@@ -21,7 +20,19 @@
  *       public/scripts/preset-manager.js:602-633
  *     这正是「必须先切换才能改」的根源。本扩展统一用 `{ skipUpdate: true }` 绕开它，
  *     再自行同步内存数组与下拉框 option，不改变当前预设。
- * ────────────────────────────────────────────────────────────────────────
+ *
+ * ── 浮窗层级依据 ─────────────────────────────────────────────────────
+ *  - 酒馆的对话弹窗 #dialogue_popup / #shadow_popup 是 z-index 9999（public/style.css:3677 / :3860）。
+ *    本窗口取 9000，**刻意压在弹窗之下**：这样「删除确认」等 Popup 能盖在浮窗之上，
+ *    点确认按钮也不会穿透到自己的遮罩而误关窗口。
+ *  - 扩展菜单 #extensionsMenu 是 29999（public/style.css:1085），比本窗口高；菜单在点击后
+ *    会自行关闭，不影响使用。
+ *  - toastr 是 999999，操作反馈始终可见。
+ *
+ * ── 入口挂载时机 ─────────────────────────────────────────────────────
+ *  #extensionsMenu 由 extensions.js:688 addExtensionsButtonAndMenu() 动态生成，
+ *  在 script.js:745 initExtensions() 中执行，早于 script.js:7965 loadExtensionSettings()
+ *  触发的扩展加载，因此扩展初始化时该容器必然已存在（仍保留重试兜底）。
  */
 
 import { extension_settings, getContext, renderExtensionTemplateAsync } from '../../../extensions.js';
@@ -45,15 +56,19 @@ const toastr = window.toastr ?? {
  * namesKey === null 表示进阶格式化模板：名字取自内容里的 name 字段，而不是文件名。
  */
 const PRESET_TYPES = [
-    { apiId: 'openai', label: 'Chat Completion 预设', contentsKey: 'openai_settings', namesKey: 'openai_setting_names' },
-    { apiId: 'textgenerationwebui', label: '文本补全预设', contentsKey: 'textgenerationwebui_presets', namesKey: 'textgenerationwebui_preset_names' },
-    { apiId: 'kobold', label: 'KoboldAI 预设', contentsKey: 'koboldai_settings', namesKey: 'koboldai_setting_names' },
-    { apiId: 'novel', label: 'NovelAI 预设', contentsKey: 'novelai_settings', namesKey: 'novelai_setting_names' },
-    { apiId: 'instruct', label: '指令模板', contentsKey: 'instruct', namesKey: null },
-    { apiId: 'context', label: '上下文模板', contentsKey: 'context', namesKey: null },
-    { apiId: 'sysprompt', label: '系统提示词', contentsKey: 'sysprompt', namesKey: null },
-    { apiId: 'reasoning', label: '推理模板', contentsKey: 'reasoning', namesKey: null },
+    { apiId: 'openai', label: 'Chat Completion', unit: '预设', icon: 'fa-comments', contentsKey: 'openai_settings', namesKey: 'openai_setting_names' },
+    { apiId: 'textgenerationwebui', label: '文本补全', unit: '预设', icon: 'fa-align-left', contentsKey: 'textgenerationwebui_presets', namesKey: 'textgenerationwebui_preset_names' },
+    { apiId: 'kobold', label: 'KoboldAI', unit: '预设', icon: 'fa-dragon', contentsKey: 'koboldai_settings', namesKey: 'koboldai_setting_names' },
+    { apiId: 'novel', label: 'NovelAI', unit: '预设', icon: 'fa-feather', contentsKey: 'novelai_settings', namesKey: 'novelai_setting_names' },
+    { apiId: 'instruct', label: '指令模板', unit: '模板', icon: 'fa-terminal', contentsKey: 'instruct', namesKey: null },
+    { apiId: 'context', label: '上下文模板', unit: '模板', icon: 'fa-layer-group', contentsKey: 'context', namesKey: null },
+    { apiId: 'sysprompt', label: '系统提示词', unit: '模板', icon: 'fa-scroll', contentsKey: 'sysprompt', namesKey: null },
+    { apiId: 'reasoning', label: '推理模板', unit: '模板', icon: 'fa-brain', contentsKey: 'reasoning', namesKey: null },
 ];
+
+const MIN_WINDOW_WIDTH = 560;
+const MIN_WINDOW_HEIGHT = 420;
+const WINDOW_EDGE_MARGIN = 16;
 
 const state = {
     /** @type {any} 最近一次 /api/settings/get 的原始响应 */
@@ -68,6 +83,8 @@ const state = {
     busy: false,
     /** @type {AbortController|null} 正在进行的快照请求 */
     inflight: null,
+    /** @type {boolean} 窗口是否打开 */
+    open: false,
 };
 
 // ───────────────────────────── 通用小工具 ─────────────────────────────
@@ -82,6 +99,13 @@ function ctx() {
 
 function jq(value) {
     return window.jQuery(value);
+}
+
+function clamp(value, min, max) {
+    if (max < min) {
+        return min;
+    }
+    return Math.min(Math.max(value, min), max);
 }
 
 function escapeHtml(value) {
@@ -130,6 +154,11 @@ function downloadJson(text, filename) {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+function moduleSettings() {
+    extension_settings[MODULE_NAME] ??= {};
+    return extension_settings[MODULE_NAME];
+}
+
 function currentType() {
     return PRESET_TYPES[state.typeIndex] ?? PRESET_TYPES[0];
 }
@@ -139,7 +168,7 @@ function isAdvancedType(type) {
 }
 
 function unitOf(type) {
-    return isAdvancedType(type) ? '模板' : '预设';
+    return type.unit;
 }
 
 /** 读取当前选中项时统一走实时句柄，避免用可能已过期的缓存值。 */
@@ -148,8 +177,13 @@ function currentSelectionName() {
     return { manager, name: manager ? manager.getSelectedPresetName() : '' };
 }
 
+/** 只在窗口打开且已加载数据时重绘，避免无意义的 DOM 操作。 */
 function repaint() {
-    const { manager, name } = currentSelectionName();
+    if (!state.open) {
+        return;
+    }
+    const { name } = currentSelectionName();
+    renderTabs();
     renderStatus(name);
     renderList(name);
 }
@@ -228,6 +262,19 @@ function buildEntries(snapshot, type) {
         });
     }
     return entries;
+}
+
+/** 不解析内容就数出某个类型的条目数，用于标签页角标。 */
+function countForType(snapshot, type) {
+    if (!snapshot) {
+        return 0;
+    }
+    if (isAdvancedType(type)) {
+        const list = Array.isArray(snapshot[type.contentsKey]) ? snapshot[type.contentsKey] : [];
+        return list.filter((item) => item && typeof item === 'object' && typeof item.name === 'string' && item.name).length;
+    }
+    const names = Array.isArray(snapshot[type.namesKey]) ? snapshot[type.namesKey] : [];
+    return names.length;
 }
 
 /** 磁盘上真实存在的预设名集合，用于同名冲突判断（不用 ST 的内存缓存当判据）。 */
@@ -410,32 +457,230 @@ function removeEntryLocal(name) {
     state.entries = state.entries.filter((e) => e.name !== name);
 }
 
+// ───────────────────────────── 窗口管理 ─────────────────────────────
+
+function windowElement() {
+    return document.getElementById('pw_window');
+}
+
+function rootElement() {
+    return document.getElementById('pw_root');
+}
+
+/** 读取持久化的窗口几何。 */
+function readGeometry() {
+    const cfg = moduleSettings();
+    cfg.window ??= {};
+    return cfg.window;
+}
+
+/** 保存当前窗口几何。 */
+function saveGeometry() {
+    const win = windowElement();
+    if (!win) {
+        return;
+    }
+    const rect = win.getBoundingClientRect();
+    moduleSettings().window = {
+        left: Math.round(rect.left),
+        top: Math.round(rect.top),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+    };
+    saveSettingsDebounced();
+}
+
+/** 把窗口摆到合法位置（含窗口被拖出视口、分辨率变小等兜底）。 */
+function applyGeometry() {
+    const win = windowElement();
+    if (!win) {
+        return;
+    }
+
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const cfg = readGeometry();
+
+    const maxW = Math.max(MIN_WINDOW_WIDTH, vw - WINDOW_EDGE_MARGIN * 2);
+    const maxH = Math.max(MIN_WINDOW_HEIGHT, vh - WINDOW_EDGE_MARGIN * 2);
+
+    const width = clamp(Math.round(cfg.width ?? Math.min(1040, maxW)), MIN_WINDOW_WIDTH, maxW);
+    const height = clamp(Math.round(cfg.height ?? Math.min(780, maxH)), MIN_WINDOW_HEIGHT, maxH);
+
+    let left = Number.isFinite(cfg.left) ? cfg.left : Math.round((vw - width) / 2);
+    let top = Number.isFinite(cfg.top) ? cfg.top : Math.round((vh - height) / 2);
+
+    left = clamp(left, WINDOW_EDGE_MARGIN - width + 140, vw - 140);
+    top = clamp(top, WINDOW_EDGE_MARGIN, vh - 60);
+
+    win.style.width = `${width}px`;
+    win.style.height = `${height}px`;
+    win.style.left = `${left}px`;
+    win.style.top = `${top}px`;
+}
+
+/** 恢复默认位置与大小（屏幕中央）。 */
+function resetGeometry() {
+    moduleSettings().window = {};
+    saveSettingsDebounced();
+    applyGeometry();
+    toastr.info('窗口已回到默认位置与大小');
+}
+
+function closeWindow() {
+    if (!state.open) {
+        return;
+    }
+    state.open = false;
+    rootElement()?.classList.remove('pw-open');
+    saveGeometry();
+}
+
+async function openWindow() {
+    const root = rootElement();
+    if (!root) {
+        toastr.error('预设工作台窗口还没准备好，请刷新页面');
+        return;
+    }
+
+    state.open = true;
+    root.classList.add('pw-open');
+    applyGeometry();
+
+    renderTabs();
+    if (!state.snapshot) {
+        await refresh();
+    } else {
+        repaint();
+    }
+}
+
+async function toggleWindow() {
+    if (state.open) {
+        closeWindow();
+    } else {
+        await openWindow();
+    }
+}
+
+function initWindowChrome() {
+    const win = windowElement();
+    const dragHandle = document.getElementById('pw_drag_handle');
+    const resizeHandle = document.getElementById('pw_resize_handle');
+
+    // ── 拖动 ──
+    let drag = null;
+    dragHandle?.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0 || event.target.closest('[data-no-drag]')) {
+            return;
+        }
+        const rect = win.getBoundingClientRect();
+        drag = { id: event.pointerId, offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top };
+        dragHandle.setPointerCapture(event.pointerId);
+        win.classList.add('pw-dragging');
+        event.preventDefault();
+    });
+    dragHandle?.addEventListener('pointermove', (event) => {
+        if (!drag || event.pointerId !== drag.id) {
+            return;
+        }
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const rect = win.getBoundingClientRect();
+        const left = clamp(event.clientX - drag.offsetX, WINDOW_EDGE_MARGIN - rect.width + 140, vw - 140);
+        const top = clamp(event.clientY - drag.offsetY, WINDOW_EDGE_MARGIN, vh - 60);
+        win.style.left = `${left}px`;
+        win.style.top = `${top}px`;
+    });
+    const endDrag = (event) => {
+        if (!drag || event.pointerId !== drag.id) {
+            return;
+        }
+        drag = null;
+        win.classList.remove('pw-dragging');
+        saveGeometry();
+    };
+    dragHandle?.addEventListener('pointerup', endDrag);
+    dragHandle?.addEventListener('pointercancel', endDrag);
+
+    // ── 调整大小（右下角手柄）──
+    let resize = null;
+    resizeHandle?.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0) {
+            return;
+        }
+        const rect = win.getBoundingClientRect();
+        resize = {
+            id: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            width: rect.width,
+            height: rect.height,
+            left: rect.left,
+            top: rect.top,
+        };
+        resizeHandle.setPointerCapture(event.pointerId);
+        win.classList.add('pw-resizing');
+        event.preventDefault();
+        event.stopPropagation();
+    });
+    resizeHandle?.addEventListener('pointermove', (event) => {
+        if (!resize || event.pointerId !== resize.id) {
+            return;
+        }
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const width = clamp(resize.width + (event.clientX - resize.startX), MIN_WINDOW_WIDTH, Math.max(MIN_WINDOW_WIDTH, vw - resize.left - WINDOW_EDGE_MARGIN));
+        const height = clamp(resize.height + (event.clientY - resize.startY), MIN_WINDOW_HEIGHT, Math.max(MIN_WINDOW_HEIGHT, vh - resize.top - WINDOW_EDGE_MARGIN));
+        win.style.width = `${width}px`;
+        win.style.height = `${height}px`;
+    });
+    const endResize = (event) => {
+        if (!resize || event.pointerId !== resize.id) {
+            return;
+        }
+        resize = null;
+        win.classList.remove('pw-resizing');
+        saveGeometry();
+    };
+    resizeHandle?.addEventListener('pointerup', endResize);
+    resizeHandle?.addEventListener('pointercancel', endResize);
+
+    // 视口尺寸变化时把窗口拉回合法范围
+    window.addEventListener('resize', () => {
+        if (state.open) {
+            applyGeometry();
+        }
+    });
+}
+
 // ───────────────────────────── 展示层 ─────────────────────────────
 
 function describeEntry(entry) {
     const data = entry.data;
     if (!data || typeof data !== 'object') {
-        return `${formatBytes(entry.size)} · 内容无法解析为 JSON`;
+        return { kind: 'broken', chips: [{ icon: 'fa-triangle-exclamation', text: '内容无法解析为 JSON' }] };
     }
 
-    const parts = [];
+    const chips = [];
     if (Array.isArray(data.prompts)) {
-        parts.push(`${data.prompts.length} 条提示词`);
+        chips.push({ icon: 'fa-list-ul', text: `${data.prompts.length} 条提示词` });
     }
     if (Array.isArray(data.prompt_order)) {
-        parts.push(`${data.prompt_order.length} 组排序`);
+        chips.push({ icon: 'fa-layer-group', text: `${data.prompt_order.length} 组排序` });
     }
     if (typeof data.content === 'string' && data.content.length) {
-        parts.push(`${data.content.length} 字符正文`);
+        chips.push({ icon: 'fa-file-lines', text: `${data.content.length} 字符正文` });
     }
     if (typeof data.temperature === 'number') {
-        parts.push(`温度 ${data.temperature}`);
+        chips.push({ icon: 'fa-temperature-half', text: `温度 ${data.temperature}` });
     }
-    if (!parts.length) {
-        parts.push(`${Object.keys(data).length} 个字段`);
-    }
+    chips.push({ icon: 'fa-database', text: formatBytes(entry.size) });
 
-    return `${formatBytes(entry.size)} · ${parts.join(' · ')}`;
+    if (!chips.length) {
+        chips.push({ icon: 'fa-database', text: formatBytes(entry.size) });
+    }
+    return { kind: 'ok', chips };
 }
 
 function visibleEntries() {
@@ -446,29 +691,32 @@ function visibleEntries() {
     return state.entries.filter((e) => e.name.toLowerCase().includes(needle));
 }
 
-function renderTypeSelect() {
-    const $select = jq('#pw_type');
-    $select.empty();
+function renderTabs() {
+    const $tabs = jq('#pw_tabs');
+    if (!$tabs.length) {
+        return;
+    }
 
-    let firstAvailable = -1;
-    PRESET_TYPES.forEach((type, index) => {
+    const parts = PRESET_TYPES.map((type, index) => {
         const available = Boolean(ctx().getPresetManager(type.apiId));
-        if (available && firstAvailable < 0) {
-            firstAvailable = index;
-        }
-        const $option = jq('<option></option>')
-            .attr('value', String(index))
-            .text(available ? type.label : `${type.label}（酒馆未启用）`);
-        if (!available) {
-            $option.attr('disabled', 'disabled');
-        }
-        $select.append($option);
+        const active = index === state.typeIndex;
+        const count = countForType(state.snapshot, type);
+        const classes = ['pw-tab'];
+        if (active) classes.push('pw-tab-active');
+        if (!available) classes.push('pw-tab-disabled');
+        return `
+            <button type="button" class="${classes.join(' ')}" data-index="${index}" ${available ? '' : 'disabled="disabled"'}
+                    title="${escapeHtml(available ? type.label : `${type.label}（酒馆未启用）`)}">
+                <i class="fa-solid ${type.icon}"></i>
+                <span class="pw-tab-label">${escapeHtml(type.label)}</span>
+                <span class="pw-tab-count">${count}</span>
+            </button>`;
     });
 
-    if (!ctx().getPresetManager(PRESET_TYPES[state.typeIndex].apiId) && firstAvailable >= 0) {
-        state.typeIndex = firstAvailable;
-    }
-    $select.val(String(state.typeIndex));
+    $tabs.html(parts.join(''));
+
+    const activeEl = $tabs.find('.pw-tab-active').get(0);
+    activeEl?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
 
 function renderStatus(currentName) {
@@ -477,91 +725,120 @@ function renderStatus(currentName) {
     const shown = visibleEntries().length;
     const duplicates = total - new Set(state.entries.map((e) => e.name)).size;
 
-    const bits = [`共 ${total} 个${unitOf(type)}`];
+    const bits = [];
+    bits.push(`<span class="pw-stat"><i class="fa-solid fa-box-archive"></i> ${total} 个${unitOf(type)}</span>`);
     if (shown !== total) {
-        bits.push(`当前显示 ${shown} 个`);
+        bits.push(`<span class="pw-stat"><i class="fa-solid fa-filter"></i> 显示 ${shown} 个</span>`);
     }
-    bits.push(`当前：${escapeHtml(currentName || '未选中')}`);
+    bits.push(`<span class="pw-stat pw-stat-current"><i class="fa-solid fa-circle-check"></i> 当前：${escapeHtml(currentName || '未选中')}</span>`);
 
-    let html = bits.join(' · ');
-
+    const notes = [];
     if (duplicates > 0) {
-        html += `<br><span class="pw-warn">检测到 ${duplicates} 个重名条目。`
-            + '进阶模板的名字取自文件内容里的 name 字段，同名会互相覆盖，建议先改掉其中一个的内部 name。</span>';
+        notes.push(`检测到 ${duplicates} 个重名条目。进阶模板的名字取自文件内容里的 name 字段，同名会互相覆盖。`);
     }
     if (isAdvancedType(type)) {
-        html += '<br><span class="pw-warn">注意：此类模板的名字存在文件内容里，'
-            + '酒馆删除时用这个名字去找文件；内容里的 name 与文件名不一致时会删不掉。</span>';
+        notes.push('此类模板的名字存在文件内容里，酒馆删除时用这个名字去找文件；内容里的 name 与文件名不一致时会删不掉。');
     }
     if (state.entries.length <= 1) {
-        html += '<br><span class="pw-warn">仅剩最后一个预设，已锁定删除，避免酒馆出现无预设可用的情况。</span>';
+        notes.push('仅剩最后一个预设，已锁定删除，避免酒馆出现无预设可用的情况。');
     }
 
-    jq('#pw_status').html(html);
+    jq('#pw_status').html(
+        `<div class="pw-status-row">${bits.join('')}</div>`
+        + notes.map((n) => `<div class="pw-note"><i class="fa-solid fa-circle-info"></i> ${escapeHtml(n)}</div>`).join(''),
+    );
+
+    const badge = document.getElementById('pw_header_count');
+    if (badge) {
+        badge.textContent = String(total);
+    }
 }
+
+const ACTION_META = {
+    apply: { label: '应用', icon: 'fa-circle-play', title: '把这条切换成当前预设' },
+    update: { label: '覆盖更新', icon: 'fa-cloud-arrow-up', title: '用当前面板里的运行设置覆盖写入这条预设，不会切换当前预设' },
+    rename: { label: '重命名', icon: 'fa-pen', title: '改名：先写新文件，确认成功后再删旧文件' },
+    copy: { label: '复制', icon: 'fa-clone', title: '复制成一条新预设' },
+    export: { label: '导出', icon: 'fa-download', title: '下载成 JSON 文件' },
+    delete: { label: '删除', icon: 'fa-trash-can', title: '从磁盘删除这个文件' },
+};
 
 function renderList(currentName) {
     const type = currentType();
-    const entries = visibleEntries();
     const $list = jq('#pw_list');
+    if (!$list.length) {
+        return;
+    }
+
+    const entries = visibleEntries();
     $list.empty();
 
     if (!entries.length) {
-        $list.append(
-            `<div class="pw-empty">${state.entries.length
-                ? '没有匹配的预设名。'
-                : '这个类型下没有找到任何预设文件。可以点「导入」把 JSON 预设放进来。'}</div>`,
+        const empty = state.entries.length
+            ? { icon: 'fa-magnifying-glass', text: '没有匹配的预设名，换个关键词试试。' }
+            : { icon: 'fa-inbox', text: `这个类型下没有找到任何预设文件。可以用「导入」把 JSON 预设放进来。` };
+        $list.html(
+            `<div class="pw-empty"><i class="fa-solid ${empty.icon}"></i><span>${escapeHtml(empty.text)}</span></div>`,
         );
         return;
     }
 
-    const unit = unitOf(type);
     const canDelete = state.entries.length > 1;
     const seen = new Set();
-    const fragments = [];
+    const cards = [];
 
     for (const entry of entries) {
         const isCurrent = currentName === entry.name;
         const isDuplicated = seen.has(entry.name);
         seen.add(entry.name);
 
-        const badges = [];
+        const chips = [];
         if (isCurrent) {
-            badges.push('<span class="pw-badge pw-badge-current">当前</span>');
+            chips.push('<span class="pw-chip pw-chip-current"><i class="fa-solid fa-bolt"></i>当前</span>');
         }
         if (entry.broken) {
-            badges.push('<span class="pw-badge pw-badge-broken">JSON 异常</span>');
+            chips.push('<span class="pw-chip pw-chip-warn"><i class="fa-solid fa-triangle-exclamation"></i>JSON 异常</span>');
         }
         if (isDuplicated) {
-            badges.push('<span class="pw-badge pw-badge-broken">重名</span>');
+            chips.push('<span class="pw-chip pw-chip-warn"><i class="fa-solid fa-clone"></i>重名</span>');
         }
 
-        fragments.push(`
-            <div class="pw-item${isCurrent ? ' pw-is-current' : ''}" data-name="${escapeHtml(entry.name)}">
-                <div class="pw-item-head">
-                    <span class="pw-name">${escapeHtml(entry.name)}</span>
-                    ${badges.join('')}
+        const described = describeEntry(entry);
+        const meta = described.chips.map((c) => (
+            `<span class="pw-meta-chip"><i class="fa-solid ${c.icon}"></i>${escapeHtml(c.text)}</span>`
+        )).join('');
+
+        const buttons = Object.entries(ACTION_META).map(([action, meta2]) => {
+            const isDelete = action === 'delete';
+            const disabled = isDelete && !canDelete;
+            const classes = ['pw-act'];
+            if (isDelete) classes.push('pw-act-danger');
+            if (action === 'apply') classes.push('pw-act-primary');
+            if (disabled) classes.push('pw-act-disabled');
+            const title = isDelete && !canDelete ? '至少保留一个预设' : meta2.title;
+            return `<button type="button" class="${classes.join(' ')}" data-act="${action}" title="${escapeHtml(title)}">
+                        <i class="fa-solid ${meta2.icon}"></i><span>${escapeHtml(meta2.label)}</span>
+                    </button>`;
+        }).join('');
+
+        cards.push(`
+            <article class="pw-card${isCurrent ? ' pw-is-current' : ''}${entry.broken ? ' pw-is-broken' : ''}" data-name="${escapeHtml(entry.name)}">
+                <div class="pw-card-head">
+                    <span class="pw-card-name" title="${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</span>
+                    <span class="pw-card-chips">${chips.join('')}</span>
                 </div>
-                <div class="pw-meta">${escapeHtml(describeEntry(entry))}</div>
-                <div class="pw-actions">
-                    <div class="menu_button" data-act="apply" title="把这个${unit}切换成当前${unit}">应用</div>
-                    <div class="menu_button" data-act="update" title="用当前面板里的运行设置覆盖写入这条${unit}（不会切换当前${unit}）">覆盖更新</div>
-                    <div class="menu_button" data-act="rename" title="改名：先写新文件，确认成功后再删旧文件">重命名</div>
-                    <div class="menu_button" data-act="copy" title="复制成一条新的${unit}">复制</div>
-                    <div class="menu_button" data-act="export" title="把这个${unit}下载成 JSON 文件">导出</div>
-                    <div class="menu_button pw-danger${canDelete ? '' : ' pw-disabled'}" data-act="delete"
-                         title="${canDelete ? `从磁盘删除这个${unit}` : '至少保留一个预设'}">删除</div>
-                </div>
-            </div>`);
+                <div class="pw-card-meta">${meta}</div>
+                <div class="pw-card-actions">${buttons}</div>
+            </article>`);
     }
 
-    $list.html(fragments.join(''));
+    $list.html(cards.join(''));
 }
 
 async function refresh({ silent = false } = {}) {
     const type = currentType();
-    if (!silent) {
-        jq('#pw_status').text('正在读取磁盘上的预设…');
+    if (!silent && state.open) {
+        jq('#pw_status').html('<div class="pw-status-row"><i class="fa-solid fa-spinner pw-spin"></i> 正在读取磁盘上的预设…</div>');
     }
 
     try {
@@ -573,8 +850,10 @@ async function refresh({ silent = false } = {}) {
         }
         console.error(LOG_PREFIX, error);
         state.entries = [];
-        jq('#pw_status').html(`<span class="pw-warn">读取失败：${escapeHtml(error?.message ?? error)}</span>`);
-        jq('#pw_list').empty();
+        if (state.open) {
+            jq('#pw_status').html(`<div class="pw-note pw-note-error"><i class="fa-solid fa-triangle-exclamation"></i> 读取失败：${escapeHtml(error?.message ?? error)}</div>`);
+            jq('#pw_list').empty();
+        }
         return;
     }
 
@@ -589,23 +868,22 @@ async function guarded(label, task) {
         return;
     }
     state.busy = true;
-    const $status = jq('#pw_status');
-    const previous = $status.html();
+    jq('#pw_root').addClass('pw-busy');
     try {
         await task();
     } catch (error) {
         console.error(LOG_PREFIX, label, error);
-        $status.html(previous);
         toastr.error(`${label}失败：${error?.message ?? error}`, '预设工作台');
     } finally {
         state.busy = false;
+        jq('#pw_root').removeClass('pw-busy');
     }
 }
 
-/** 应用：切成交互中的当前预设 */
+/** 应用：切换成当前预设 */
 async function opApply(type, entry) {
     const manager = getManager(type.apiId);
-    let { preset_names } = manager.getPresetList();
+    const { preset_names } = manager.getPresetList();
 
     let value;
     if (manager.isKeyedApi()) {
@@ -862,28 +1140,12 @@ async function opImport(type, files) {
 
 // ───────────────────────────── 事件绑定 ─────────────────────────────
 
-const ACTION_LABELS = {
-    apply: '应用',
-    update: '覆盖更新',
-    rename: '重命名',
-    copy: '复制',
-    delete: '删除',
-};
+function bindWindowUi() {
+    jq('#pw_btn_close').on('click', closeWindow);
+    jq('#pw_backdrop').on('click', closeWindow);
+    jq('#pw_btn_recenter').on('click', resetGeometry);
 
-function bindUi() {
-    jq('#pw_type').on('change', async function () {
-        state.typeIndex = Number(jq(this).val()) || 0;
-        extension_settings[MODULE_NAME].typeIndex = state.typeIndex;
-        saveSettingsDebounced();
-        await refresh();
-    });
-
-    jq('#pw_search').on('input', function () {
-        state.filter = String(jq(this).val() ?? '');
-        repaint();
-    });
-
-    jq('#pw_refresh').on('click', async function () {
+    jq('#pw_btn_refresh').on('click', async function () {
         const icon = jq(this).find('i');
         icon.addClass('pw-spin');
         try {
@@ -896,7 +1158,35 @@ function bindUi() {
         }
     });
 
-    jq('#pw_import').on('click', () => {
+    jq('#pw_tabs').on('click', '.pw-tab', async function () {
+        const index = Number(jq(this).data('index'));
+        if (!Number.isFinite(index) || index === state.typeIndex) {
+            return;
+        }
+        if (!ctx().getPresetManager(PRESET_TYPES[index]?.apiId)) {
+            return;
+        }
+        state.typeIndex = index;
+        moduleSettings().typeIndex = index;
+        saveSettingsDebounced();
+        renderTabs();
+        await refresh();
+    });
+
+    jq('#pw_search').on('input', function () {
+        state.filter = String(jq(this).val() ?? '');
+        jq('#pw_search_clear').toggleClass('pw-visible', state.filter.length > 0);
+        repaint();
+    });
+
+    jq('#pw_search_clear').on('click', () => {
+        state.filter = '';
+        jq('#pw_search').val('');
+        jq('#pw_search_clear').removeClass('pw-visible');
+        repaint();
+    });
+
+    jq('#pw_btn_import').on('click', () => {
         jq('#pw_import_file').trigger('click');
     });
 
@@ -910,17 +1200,17 @@ function bindUi() {
         await guarded('导入', () => opImport(type, files));
     });
 
-    jq('#pw_export_all').on('click', () => {
+    jq('#pw_btn_export_all').on('click', () => {
         opExportAll(currentType());
     });
 
     jq('#pw_list').on('click', async function (event) {
         const $button = jq(event.target).closest('[data-act]');
-        if (!$button.length) {
+        if (!$button.length || $button.hasClass('pw-act-disabled')) {
             return;
         }
-        const $item = $button.closest('.pw-item');
-        const name = String($item.attr('data-name') ?? '');
+        const $card = $button.closest('.pw-card');
+        const name = String($card.attr('data-name') ?? '');
         const entry = state.entries.find((e) => e.name === name);
         if (!entry) {
             console.warn(LOG_PREFIX, '找不到条目', name);
@@ -935,7 +1225,7 @@ function bindUi() {
             return;
         }
 
-        await guarded(ACTION_LABELS[action] ?? '操作', async () => {
+        await guarded(ACTION_META[action]?.label ?? '操作', async () => {
             switch (action) {
                 case 'apply':
                     return opApply(type, entry);
@@ -952,48 +1242,113 @@ function bindUi() {
             }
         });
     });
+
+    // Esc 关闭；酒馆自己弹窗打开时让位给它
+    jq(document).on('keydown.presetWorkbench', (event) => {
+        if (event.key !== 'Escape' || !state.open) {
+            return;
+        }
+        if (jq('#dialogue_popup').is(':visible')) {
+            return;
+        }
+        closeWindow();
+    });
 }
 
 function bindHostEvents() {
-    // 别的扩展删掉了预设：重新读磁盘
+    // 别的扩展删掉了预设：窗口开着就重新读磁盘
     eventSource.on(event_types.PRESET_DELETED, async (payload) => {
-        if (payload?.apiId && payload.apiId === currentType().apiId) {
+        if (state.open && (!payload?.apiId || payload.apiId === currentType().apiId)) {
             await refresh({ silent: true });
         }
     });
 
-    // 切换预设只影响「当前」标记，重绘即可，不必再拉一次 8MB 快照
+    // 切换预设只影响「当前」标记，重绘即可，不必再拉一次快照
     eventSource.on(event_types.OAI_PRESET_CHANGED_AFTER, () => {
-        if (currentType().apiId === 'openai') {
+        if (state.open && currentType().apiId === 'openai') {
             repaint();
         }
     });
 }
 
+// ───────────────────────────── 入口挂载 ─────────────────────────────
+
+/**
+ * 往酒馆魔杖菜单里挂一个入口。
+ * #extensionsMenu 由 extensions.js 动态生成到 body；正常情况下扩展加载时已存在，
+ * 这里仍做有限次重试以防加载顺序变化。
+ */
+function mountMenuEntry(attempt = 0) {
+    if (jq('#pw_menu_entry').length) {
+        return;
+    }
+
+    const $menu = jq('#extensionsMenu');
+    if (!$menu.length) {
+        if (attempt < 20) {
+            setTimeout(() => mountMenuEntry(attempt + 1), 250);
+        } else {
+            console.warn(LOG_PREFIX, '没有找到扩展菜单容器 #extensionsMenu，入口未能挂载');
+        }
+        return;
+    }
+
+    $menu.append(`
+        <div id="pw_menu_entry" class="pw-menu-entry" title="预设工作台 · 集中管理全部预设">
+            <div class="fa-solid fa-sliders extensionsMenuExtensionButton"></div>
+            <span>预设工作台</span>
+        </div>`);
+
+    jq('#pw_menu_entry').on('click', () => {
+        openWindow();
+    });
+}
+
+/** 注册 /pw 命令，作为键盘入口。 */
+function registerSlashCommand() {
+    try {
+        const context = ctx();
+        const { SlashCommand, SlashCommandParser } = context;
+        if (!SlashCommand || !SlashCommandParser) {
+            return;
+        }
+        SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+            name: 'pw',
+            callback: async () => {
+                await toggleWindow();
+                return '';
+            },
+            returns: 'string',
+            helpString: '打开 / 关闭预设工作台窗口。',
+        }));
+    } catch (error) {
+        console.warn(LOG_PREFIX, '注册 /pw 命令失败（不影响主功能）', error);
+    }
+}
+
 // ───────────────────────────── 初始化 ─────────────────────────────
 
 window.jQuery(async () => {
-    if (jq('.preset-workbench').length) {
+    if (jq('#pw_root').length) {
         return;
     }
 
     try {
         const html = await renderExtensionTemplateAsync(EXTENSION_PATH, 'settings');
-        jq('#extensions_settings2').append(html);
+        jq(document.body).append(html);
 
-        extension_settings[MODULE_NAME] ??= {};
-        extension_settings[MODULE_NAME].typeIndex ??= 0;
-        state.typeIndex = Number(extension_settings[MODULE_NAME].typeIndex) || 0;
+        state.typeIndex = Number(moduleSettings().typeIndex) || 0;
         if (!PRESET_TYPES[state.typeIndex]) {
             state.typeIndex = 0;
         }
 
-        renderTypeSelect();
-        bindUi();
+        initWindowChrome();
+        bindWindowUi();
         bindHostEvents();
-        await refresh();
+        mountMenuEntry();
+        registerSlashCommand();
 
-        console.log(LOG_PREFIX, '已加载');
+        console.log(LOG_PREFIX, '已加载，从扩展菜单（魔杖图标）打开');
     } catch (error) {
         console.error(LOG_PREFIX, '加载失败', error);
         toastr.error(`预设工作台加载失败：${error?.message ?? error}`);
