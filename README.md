@@ -164,6 +164,8 @@ git clone https://github.com/xxz-118/preset-workbench.git
 
 ## 兼容性与版本要求
 
+> 一页纸的精简要求单独放在 [REQUIREMENTS.md](REQUIREMENTS.md)；下面是完整依据。
+
 **最低要求：SillyTavern 1.13.5。** 实测于 1.18.0。
 
 这不是估计值，是逐个 API 检出酒馆历史版本验证出来的。扩展依赖的每项能力及其首次出现版本：

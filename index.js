@@ -81,7 +81,7 @@ const UPDATE_RELEASES_LIST_API = `https://api.github.com/repos/${UPDATE_REPO}/re
 const UPDATE_RELEASES_URL = `https://github.com/${UPDATE_REPO}/releases`;
 
 /** 本地版本兜底值；正常情况下读的是 manifest.json 的 version，两者需保持一致。 */
-const EXTENSION_VERSION_FALLBACK = '1.3.4';
+const EXTENSION_VERSION_FALLBACK = '1.3.5';
 
 /**
  * 调用酒馆更新接口时用的扩展名。
