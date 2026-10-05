@@ -70,6 +70,11 @@ const MIN_WINDOW_WIDTH = 560;
 const MIN_WINDOW_HEIGHT = 420;
 const WINDOW_EDGE_MARGIN = 16;
 
+/** 视口任一边小于阈值就切到「紧凑模式」：贴边铺满，不拖动、不缩放。 */
+const COMPACT_MAX_WIDTH = 720;
+const COMPACT_MAX_HEIGHT = 560;
+const COMPACT_MARGIN = 8;
+
 const state = {
     /** @type {any} 最近一次 /api/settings/get 的原始响应 */
     snapshot: null,
@@ -474,10 +479,10 @@ function readGeometry() {
     return cfg.window;
 }
 
-/** 保存当前窗口几何。 */
+/** 保存当前窗口几何。紧凑模式下窗口是铺满的，不覆盖用户在桌面端的布局记忆。 */
 function saveGeometry() {
     const win = windowElement();
-    if (!win) {
+    if (!win || isCompactViewport()) {
         return;
     }
     const rect = win.getBoundingClientRect();
@@ -490,28 +495,69 @@ function saveGeometry() {
     saveSettingsDebounced();
 }
 
-/** 把窗口摆到合法位置（含窗口被拖出视口、分辨率变小等兜底）。 */
+/**
+ * 紧凑视口判定：手机、平板竖屏，以及桌面上被压得很扁的窗口都算。
+ * 用实时视口尺寸而不是 UA，这样旋转屏幕、拉伸桌面窗口都能立刻响应。
+ */
+function isCompactViewport() {
+    const vv = window.visualViewport;
+    const vw = vv?.width ?? window.innerWidth;
+    const vh = vv?.height ?? window.innerHeight;
+    return vw <= COMPACT_MAX_WIDTH || vh <= COMPACT_MAX_HEIGHT;
+}
+
+/**
+ * 当前可见视口。
+ * 手机上软键盘弹出时 window.innerHeight 通常不变，但 visualViewport.height 会缩小，
+ * 所以必须优先读它，窗口才能跟着键盘一起收缩。
+ */
+function viewportBox() {
+    const vv = window.visualViewport;
+    return {
+        width: Math.round(vv?.width ?? window.innerWidth),
+        height: Math.round(vv?.height ?? window.innerHeight),
+        offsetLeft: Math.round(vv?.offsetLeft ?? 0),
+        offsetTop: Math.round(vv?.offsetTop ?? 0),
+    };
+}
+
+/**
+ * 把窗口摆到当前视口里。
+ *  - 紧凑视口：贴边铺满可见区域，忽略持久化几何（手机上拖窗口没有意义）。
+ *  - 常规视口：还原用户上次的位置与尺寸，并做边界兜底（被拖出屏幕 / 分辨率变小）。
+ */
 function applyGeometry() {
     const win = windowElement();
     if (!win) {
         return;
     }
 
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const cfg = readGeometry();
+    const box = viewportBox();
 
-    const maxW = Math.max(MIN_WINDOW_WIDTH, vw - WINDOW_EDGE_MARGIN * 2);
-    const maxH = Math.max(MIN_WINDOW_HEIGHT, vh - WINDOW_EDGE_MARGIN * 2);
+    if (isCompactViewport()) {
+        const m = COMPACT_MARGIN;
+        win.classList.add('pw-compact');
+        win.style.width = `${Math.max(240, box.width - m * 2)}px`;
+        win.style.height = `${Math.max(240, box.height - m * 2)}px`;
+        win.style.left = `${box.offsetLeft + m}px`;
+        win.style.top = `${box.offsetTop + m}px`;
+        return;
+    }
+
+    win.classList.remove('pw-compact');
+
+    const cfg = readGeometry();
+    const maxW = Math.max(MIN_WINDOW_WIDTH, box.width - WINDOW_EDGE_MARGIN * 2);
+    const maxH = Math.max(MIN_WINDOW_HEIGHT, box.height - WINDOW_EDGE_MARGIN * 2);
 
     const width = clamp(Math.round(cfg.width ?? Math.min(1040, maxW)), MIN_WINDOW_WIDTH, maxW);
     const height = clamp(Math.round(cfg.height ?? Math.min(780, maxH)), MIN_WINDOW_HEIGHT, maxH);
 
-    let left = Number.isFinite(cfg.left) ? cfg.left : Math.round((vw - width) / 2);
-    let top = Number.isFinite(cfg.top) ? cfg.top : Math.round((vh - height) / 2);
+    let left = Number.isFinite(cfg.left) ? cfg.left : Math.round((box.width - width) / 2);
+    let top = Number.isFinite(cfg.top) ? cfg.top : Math.round((box.height - height) / 2);
 
-    left = clamp(left, WINDOW_EDGE_MARGIN - width + 140, vw - 140);
-    top = clamp(top, WINDOW_EDGE_MARGIN, vh - 60);
+    left = clamp(left, WINDOW_EDGE_MARGIN - width + 140, Math.max(WINDOW_EDGE_MARGIN, box.width - 140));
+    top = clamp(top, WINDOW_EDGE_MARGIN, Math.max(WINDOW_EDGE_MARGIN, box.height - 60));
 
     win.style.width = `${width}px`;
     win.style.height = `${height}px`;
@@ -519,12 +565,30 @@ function applyGeometry() {
     win.style.top = `${top}px`;
 }
 
+let viewportSyncQueued = false;
+
+/** 视口变化时重新摆放窗口；用 rAF 合帧，避免软键盘弹出与滚动期间疯狂重排。 */
+function scheduleViewportSync() {
+    if (viewportSyncQueued) {
+        return;
+    }
+    viewportSyncQueued = true;
+    requestAnimationFrame(() => {
+        viewportSyncQueued = false;
+        if (state.open) {
+            applyGeometry();
+        }
+    });
+}
+
 /** 恢复默认位置与大小（屏幕中央）。 */
 function resetGeometry() {
     moduleSettings().window = {};
     saveSettingsDebounced();
     applyGeometry();
-    toastr.info('窗口已回到默认位置与大小');
+    toastr.info(isCompactViewport()
+        ? '小屏幕上窗口会自动铺满可用区域'
+        : '窗口已回到默认位置与大小');
 }
 
 function closeWindow() {
@@ -571,7 +635,8 @@ function initWindowChrome() {
     // ── 拖动 ──
     let drag = null;
     dragHandle?.addEventListener('pointerdown', (event) => {
-        if (event.button !== 0 || event.target.closest('[data-no-drag]')) {
+        // 紧凑模式（手机）下窗口是铺满的，拖动没有意义
+        if (isCompactViewport() || event.button !== 0 || event.target.closest('[data-no-drag]')) {
             return;
         }
         const rect = win.getBoundingClientRect();
@@ -646,12 +711,13 @@ function initWindowChrome() {
     resizeHandle?.addEventListener('pointerup', endResize);
     resizeHandle?.addEventListener('pointercancel', endResize);
 
-    // 视口尺寸变化时把窗口拉回合法范围
-    window.addEventListener('resize', () => {
-        if (state.open) {
-            applyGeometry();
-        }
-    });
+    // ── 视口变化 ──
+    // window.resize 覆盖桌面拉伸与手机旋转；visualViewport 覆盖手机软键盘弹出
+    // （iOS Safari 在键盘弹出时不触发 window.resize，只能靠 visualViewport）。
+    window.addEventListener('resize', scheduleViewportSync);
+    window.addEventListener('orientationchange', scheduleViewportSync);
+    window.visualViewport?.addEventListener('resize', scheduleViewportSync);
+    window.visualViewport?.addEventListener('scroll', scheduleViewportSync);
 }
 
 // ───────────────────────────── 展示层 ─────────────────────────────

@@ -26,6 +26,8 @@
     -webkit-backdrop-filter: blur(calc(var(--SmartThemeBlurStrength, 10px) * 0.6));
     backdrop-filter: blur(calc(var(--SmartThemeBlurStrength, 10px) * 0.6));
     animation: pw-fade-in 0.16s ease-out;
+    /* 手机上挡住遮罩上的滑动，避免穿透滚动到底层聊天 */
+    touch-action: none;
 }
 
 /* ══════════ 窗口本体 ══════════ */
@@ -371,6 +373,7 @@
     padding: 2px 12px 12px;
     overflow-y: auto;
     overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
 }
 
 .pw-empty {
@@ -699,36 +702,115 @@
     pointer-events: none;
 }
 
+/* ══════════ 紧凑模式（手机 / 平板竖屏 / 极窄桌面窗口） ══════════ */
+
+/*
+ * .pw-compact 由 JS 按实时视口尺寸添加，比单纯靠 media query 更可靠：
+ * 横屏手机的宽度可能超过断点，但视口高度很小，同样需要铺满模式。
+ * 它同时覆盖 JS 内联的 width/height，所以 min/max 约束必须一并放开。
+ */
+.pw-window.pw-compact {
+    min-width: 0;
+    min-height: 0;
+    max-width: none;
+    max-height: none;
+    border-radius: 12px;
+}
+
+.pw-window.pw-compact .pw-header {
+    cursor: default;
+    padding-top: calc(10px + env(safe-area-inset-top, 0px));
+}
+
+.pw-window.pw-compact .pw-resize-handle,
+.pw-window.pw-compact #pw_btn_recenter {
+    display: none;
+}
+
+.pw-window.pw-compact .pw-footer {
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+}
+
+.pw-window.pw-compact .pw-list {
+    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+}
+
+/* 触摸目标不小于舒适尺寸，避免误触 */
+.pw-window.pw-compact .pw-icon-btn {
+    width: 34px;
+    height: 34px;
+}
+
+.pw-window.pw-compact .pw-btn,
+.pw-window.pw-compact .pw-act {
+    min-height: 32px;
+}
+
+.pw-window.pw-compact .pw-tabs {
+    padding-top: 8px;
+}
+
+/* ══════════ 触摸交互 ══════════ */
+
+/* 允许滚动，但禁止双击缩放 */
+.pw-icon-btn,
+.pw-btn,
+.pw-act,
+.pw-tab,
+.pw-search-clear {
+    touch-action: manipulation;
+}
+
+.pw-window.pw-compact .pw-act,
+.pw-window.pw-compact .pw-btn {
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+}
+
 /* ══════════ 窄屏适配 ══════════ */
 
 @media (max-width: 700px) {
-    .pw-window {
-        min-width: 0;
-        min-height: 0;
-        border-radius: 12px;
-    }
-
+    /* 按钮只留图标，标签页只留图标（当前项保留文字），给小屏腾出空间 */
     .pw-card-actions {
         gap: 5px;
+    }
+
+    .pw-act {
+        padding: 6px 10px;
     }
 
     .pw-act span {
         display: none;
     }
 
-    .pw-act {
-        padding: 5px 9px;
+    .pw-tab {
+        padding: 7px 11px;
     }
 
     .pw-tab-label {
         display: none;
     }
 
-    .pw-tab {
-        padding: 6px 10px;
-    }
-
     .pw-tab-active .pw-tab-label {
         display: inline;
+    }
+
+    .pw-card {
+        padding: 9px 10px 9px 13px;
+    }
+}
+
+/* 触屏设备（含大平板）：不依赖 hover，用按下反馈代替 */
+@media (hover: none) {
+    .pw-card:active {
+        border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 60%, transparent);
+        background-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 14%, transparent);
+    }
+
+    .pw-act:active,
+    .pw-btn:active,
+    .pw-tab:active {
+        background-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 24%, transparent);
     }
 }
