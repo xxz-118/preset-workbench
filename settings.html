@@ -9,6 +9,10 @@
                 <span id="pw_header_count" class="pw-header-count">0</span>
             </div>
             <div class="pw-header-actions" data-no-drag="1">
+                <button type="button" id="pw_btn_update" class="pw-icon-btn pw-update-indicator" title="检查扩展更新">
+                    <i class="fa-solid fa-cloud-arrow-down"></i>
+                    <span id="pw_update_dot" class="pw-update-dot"></span>
+                </button>
                 <button type="button" id="pw_btn_refresh" class="pw-icon-btn" title="重新扫描磁盘上的预设目录">
                     <i class="fa-solid fa-rotate"></i>
                 </button>
@@ -45,6 +49,25 @@
 
             <div id="pw_list" class="pw-list"></div>
         </div>
+
+        <section id="pw_update_banner" class="pw-update-banner">
+            <div class="pw-update-top">
+                <span class="pw-update-badge"><i class="fa-solid fa-circle-up"></i></span>
+                <span class="pw-update-text" id="pw_update_text"></span>
+                <span class="pw-update-buttons">
+                    <button type="button" id="pw_btn_update_apply" class="pw-btn pw-btn-accent">
+                        <i class="fa-solid fa-download"></i><span>立即更新</span>
+                    </button>
+                    <button type="button" id="pw_btn_update_notes" class="pw-btn pw-btn-ghost">
+                        <i class="fa-solid fa-file-lines"></i><span>更新内容</span>
+                    </button>
+                    <button type="button" id="pw_btn_update_dismiss" class="pw-icon-btn" title="不再提示这个版本">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </span>
+            </div>
+            <div class="pw-update-notes" id="pw_update_notes"></div>
+        </section>
 
         <footer class="pw-footer">
             <div id="pw_status" class="pw-status">正在读取…</div>

@@ -75,6 +75,25 @@ const COMPACT_MAX_WIDTH = 720;
 const COMPACT_MAX_HEIGHT = 560;
 const COMPACT_MARGIN = 8;
 
+/** 扩展自身的仓库坐标，用于检查更新。 */
+const UPDATE_REPO = 'xxz-118/preset-workbench';
+const UPDATE_RELEASES_API = `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`;
+const UPDATE_RELEASES_URL = `https://github.com/${UPDATE_REPO}/releases`;
+
+/** 本地版本兜底值；正常情况下读的是 manifest.json 的 version，两者需保持一致。 */
+const EXTENSION_VERSION_FALLBACK = '1.3.0';
+
+/**
+ * 调用酒馆更新接口时用的扩展名。
+ * 酒馆前端自己传的是 name.replace('third-party','') 的结果（public/scripts/extensions.js:919
+ * 的 externalId），服务端再用 sanitize() 去掉斜杠拼成目录名
+ * （src/endpoints/extensions.js:176-187），所以这里保持同一形态最稳。
+ */
+const UPDATE_NAME = EXTENSION_PATH.replace('third-party', '');
+
+/** 自动检查更新的最短间隔：同一版本 24 小时内只请求一次 GitHub。 */
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
 const state = {
     /** @type {any} 最近一次 /api/settings/get 的原始响应 */
     snapshot: null,
@@ -90,6 +109,17 @@ const state = {
     inflight: null,
     /** @type {boolean} 窗口是否打开 */
     open: false,
+};
+
+/** 更新检查的运行时状态。 */
+const updateState = {
+    localVersion: EXTENSION_VERSION_FALLBACK,
+    /** @type {{version:string, notes:string, url:string, publishedAt:string}|null} */
+    latest: null,
+    checking: false,
+    hasUpdate: false,
+    failed: false,
+    notesOpen: false,
 };
 
 // ───────────────────────────── 通用小工具 ─────────────────────────────
@@ -159,6 +189,72 @@ function downloadJson(text, filename) {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+/** 语义化版本比较：a > b 返回 1，a < b 返回 -1，相等返回 0。 */
+function compareVersions(a, b) {
+    const parse = (value) => String(value ?? '').replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+    const pa = parse(a);
+    const pb = parse(b);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+        if (diff !== 0) {
+            return diff > 0 ? 1 : -1;
+        }
+    }
+    return 0;
+}
+
+/**
+ * 极简 Markdown 渲染，只覆盖 release notes 实际会用到的语法。
+ * 先整体转义再替换标记，所以内容里出现尖括号也不会造成注入。
+ */
+function renderNotesHtml(markdown) {
+    const escaped = escapeHtml(String(markdown ?? '').trim());
+    if (!escaped) {
+        return '<div class="pw-notes-empty">这个版本没有写更新说明。</div>';
+    }
+
+    const inline = (text) => text
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+        .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+
+    const out = [];
+    let inList = false;
+    const closeList = () => {
+        if (inList) {
+            out.push('</ul>');
+            inList = false;
+        }
+    };
+
+    for (const raw of escaped.split(/\r?\n/)) {
+        const line = raw.trimEnd();
+
+        if (/^#{1,6}\s+/.test(line)) {
+            closeList();
+            out.push(`<h4>${inline(line.replace(/^#{1,6}\s+/, ''))}</h4>`);
+            continue;
+        }
+        if (/^\s*[-*]\s+/.test(line)) {
+            if (!inList) {
+                out.push('<ul>');
+                inList = true;
+            }
+            out.push(`<li>${inline(line.replace(/^\s*[-*]\s+/, ''))}</li>`);
+            continue;
+        }
+        if (!line.trim()) {
+            closeList();
+            continue;
+        }
+        closeList();
+        out.push(`<div>${inline(line)}</div>`);
+    }
+
+    closeList();
+    return out.join('');
+}
+
 function moduleSettings() {
     extension_settings[MODULE_NAME] ??= {};
     return extension_settings[MODULE_NAME];
@@ -191,6 +287,7 @@ function repaint() {
     renderTabs();
     renderStatus(name);
     renderList(name);
+    renderUpdateUi();
 }
 
 // ───────────────────────────── 数据层 ─────────────────────────────
@@ -617,6 +714,9 @@ async function openWindow() {
     } else {
         repaint();
     }
+
+    // 顺手检查更新：同一版本 24 小时内只请求一次 GitHub，静默失败不影响使用
+    void checkForUpdate({ silent: true });
 }
 
 async function toggleWindow() {
@@ -809,8 +909,11 @@ function renderStatus(currentName) {
         notes.push('仅剩最后一个预设，已锁定删除，避免酒馆出现无预设可用的情况。');
     }
 
+    const versionChip = `<span class="pw-version" id="pw_version" title="点击检查扩展更新">`
+        + `<i class="fa-solid fa-cloud-arrow-down"></i>v${escapeHtml(updateState.localVersion)}</span>`;
+
     jq('#pw_status').html(
-        `<div class="pw-status-row">${bits.join('')}</div>`
+        `<div class="pw-status-row">${bits.join('')}${versionChip}</div>`
         + notes.map((n) => `<div class="pw-note"><i class="fa-solid fa-circle-info"></i> ${escapeHtml(n)}</div>`).join(''),
     );
 
@@ -1211,6 +1314,29 @@ function bindWindowUi() {
     jq('#pw_backdrop').on('click', closeWindow);
     jq('#pw_btn_recenter').on('click', resetGeometry);
 
+    // ── 更新相关 ──
+    jq('#pw_btn_update').on('click', () => checkForUpdate({ force: true, silent: false }));
+
+    // 版本徽章在状态栏里会被反复重建，所以用委托
+    jq('#pw_status').on('click', '#pw_version', () => checkForUpdate({ force: true, silent: false }));
+
+    jq('#pw_btn_update_apply').on('click', () => guarded('更新扩展', applyUpdate));
+
+    jq('#pw_btn_update_notes').on('click', () => {
+        updateState.notesOpen = !updateState.notesOpen;
+        renderUpdateUi();
+    });
+
+    jq('#pw_btn_update_dismiss').on('click', () => {
+        const cache = readUpdateCache();
+        cache.dismissed = updateState.latest?.version ?? null;
+        saveSettingsDebounced();
+        updateState.hasUpdate = false;
+        updateState.notesOpen = false;
+        renderUpdateUi();
+        toastr.info('这个版本不再提示，需要时可用标题栏的更新按钮手动检查');
+    });
+
     jq('#pw_btn_refresh').on('click', async function () {
         const icon = jq(this).find('i');
         icon.addClass('pw-spin');
@@ -1337,6 +1463,225 @@ function bindHostEvents() {
     });
 }
 
+// ───────────────────────────── 更新模块 ─────────────────────────────
+
+/**
+ * 本地版本号。优先读酒馆已经加载好的 manifest（与扩展列表显示的版本一致），
+ * 读不到时退回内置常量。
+ */
+function localVersion() {
+    try {
+        const manifest = ctx().getExtensionManifest?.(EXTENSION_PATH);
+        if (manifest?.version) {
+            return String(manifest.version);
+        }
+    } catch (error) {
+        console.warn(LOG_PREFIX, '读取 manifest 版本失败', error);
+    }
+    return EXTENSION_VERSION_FALLBACK;
+}
+
+/** 读取持久化的更新缓存。 */
+function readUpdateCache() {
+    const cfg = moduleSettings();
+    cfg.update ??= {};
+    return cfg.update;
+}
+
+/** 把本地版本与缓存的远端版本对齐，算出是否该提示更新。 */
+function syncUpdateState() {
+    updateState.localVersion = localVersion();
+
+    const cache = readUpdateCache();
+    updateState.latest = cache.latest ?? null;
+
+    const remoteVersion = cache.latest?.version;
+    const outdated = Boolean(remoteVersion) && compareVersions(remoteVersion, updateState.localVersion) > 0;
+
+    // 用户对该版本点过「不再提示」就静默；手动检查仍会显示结果
+    updateState.hasUpdate = outdated && cache.dismissed !== remoteVersion;
+}
+
+/**
+ * 向 GitHub 查询最新 Release。
+ * 用 release 而不是 commit 列表，是因为一次请求就能同时拿到版本号和更新内容。
+ */
+async function fetchLatestRelease() {
+    const response = await fetch(UPDATE_RELEASES_API, {
+        headers: { Accept: 'application/vnd.github+json' },
+    });
+
+    if (response.status === 404) {
+        return null; // 仓库还没有发布任何 release
+    }
+    if (!response.ok) {
+        throw new Error(`GitHub 返回 ${response.status}`);
+    }
+
+    const data = await response.json();
+    return {
+        version: String(data.tag_name ?? '').replace(/^v/i, ''),
+        notes: String(data.body ?? ''),
+        url: String(data.html_url ?? UPDATE_RELEASES_URL),
+        publishedAt: String(data.published_at ?? ''),
+    };
+}
+
+/**
+ * 检查更新。
+ * @param {boolean} force 忽略 24 小时间隔（手动触发）
+ * @param {boolean} silent 静默模式：不弹提示，只更新界面
+ */
+async function checkForUpdate({ force = false, silent = true } = {}) {
+    if (updateState.checking) {
+        return;
+    }
+
+    const cache = readUpdateCache();
+    const lastChecked = Number(cache.checkedAt) || 0;
+
+    if (!force && Date.now() - lastChecked < UPDATE_CHECK_INTERVAL_MS) {
+        syncUpdateState();
+        renderUpdateUi();
+        return;
+    }
+
+    updateState.checking = true;
+    updateState.failed = false;
+    renderUpdateUi();
+
+    try {
+        const release = await fetchLatestRelease();
+        cache.checkedAt = Date.now();
+        if (release) {
+            cache.latest = release;
+        }
+        syncUpdateState();
+
+        if (!silent) {
+            if (!release) {
+                toastr.info('仓库上还没有发布版本');
+            } else if (updateState.hasUpdate) {
+                toastr.success(`发现新版本 v${release.version}`);
+            } else {
+                toastr.success(`已是最新版本 v${updateState.localVersion}`);
+            }
+        }
+    } catch (error) {
+        console.warn(LOG_PREFIX, '检查更新失败', error);
+        updateState.failed = true;
+        if (!silent) {
+            toastr.warning(`检查更新失败：${error?.message ?? error}`);
+        }
+    } finally {
+        updateState.checking = false;
+        saveSettingsDebounced();
+        renderUpdateUi();
+    }
+}
+
+/** 渲染标题栏提示点、更新提示条与状态栏版本徽章。 */
+function renderUpdateUi() {
+    if (!state.open) {
+        return;
+    }
+
+    const remoteVersion = updateState.latest?.version;
+    const outdated = Boolean(remoteVersion) && compareVersions(remoteVersion, updateState.localVersion) > 0;
+    const ignored = Boolean(remoteVersion) && readUpdateCache().dismissed === remoteVersion;
+    const showBanner = outdated && !ignored;
+
+    jq('#pw_btn_update')
+        .toggleClass('pw-has-update', showBanner)
+        .find('i')
+        .toggleClass('pw-spin', updateState.checking);
+
+    if (showBanner) {
+        jq('#pw_update_text').html(
+            `有新版本 <b>v${escapeHtml(remoteVersion)}</b> 可用，当前是 v${escapeHtml(updateState.localVersion)}。`
+            + (updateState.latest?.publishedAt
+                ? ` <span class="pw-update-date">发布于 ${escapeHtml(String(updateState.latest.publishedAt).slice(0, 10))}</span>`
+                : ''),
+        );
+        jq('#pw_update_notes').html(renderNotesHtml(updateState.latest?.notes));
+    } else {
+        updateState.notesOpen = false;
+    }
+
+    jq('#pw_update_banner').toggleClass('pw-visible', showBanner);
+    jq('#pw_update_notes').toggleClass('pw-visible', showBanner && updateState.notesOpen);
+    jq('#pw_btn_update_notes').find('span').text(updateState.notesOpen ? '收起' : '更新内容');
+
+    jq('#pw_version')
+        .toggleClass('pw-version-outdated', outdated)
+        .attr('title', outdated
+            ? `当前 v${updateState.localVersion}，最新 v${remoteVersion}。点击检查更新`
+            : `当前 v${updateState.localVersion}。点击检查更新`);
+}
+
+/**
+ * 一键更新：调用酒馆自己的扩展更新接口（服务端内部执行 git pull）。
+ * 先按 local 试、再按 global 试，覆盖两种安装位置。
+ */
+async function applyUpdate() {
+    const attempts = [
+        { extensionName: UPDATE_NAME, global: false },
+        { extensionName: UPDATE_NAME, global: true },
+    ];
+
+    let lastError = null;
+
+    for (const body of attempts) {
+        let response;
+        try {
+            response = await fetch('/api/extensions/update', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify(body),
+            });
+        } catch (error) {
+            lastError = error;
+            continue;
+        }
+
+        if (response.status === 404 || response.status === 403) {
+            lastError = new Error(response.status === 403
+                ? '没有权限更新 global 扩展（需要管理员）'
+                : '酒馆在这条路径下找不到扩展目录');
+            continue;
+        }
+
+        if (!response.ok) {
+            lastError = new Error((await response.text()) || response.statusText);
+            continue;
+        }
+
+        const data = await response.json();
+
+        if (data.isUpToDate) {
+            toastr.info('酒馆这边没有检测到新的提交，稍后再试一次');
+            await checkForUpdate({ force: true, silent: true });
+            return;
+        }
+
+        const commit = escapeHtml(String(data.shortCommitHash ?? ''));
+        const confirmed = await ctx().Popup.show.confirm(
+            '更新完成',
+            `已拉到提交 <code>${commit}</code>。<br>新代码要刷新页面才会生效，现在刷新吗？`,
+        );
+        if (confirmed) {
+            window.location.reload();
+        }
+        return;
+    }
+
+    const hint = '更新失败：这个副本可能不是用 git 安装的（例如手动复制文件），酒馆无法直接更新它。';
+    toastr.error(
+        lastError ? `${hint}<br>原因：${escapeHtml(lastError.message ?? String(lastError))}` : hint,
+        '预设工作台',
+    );
+}
+
 // ───────────────────────────── 入口挂载 ─────────────────────────────
 
 /**
@@ -1413,6 +1758,7 @@ window.jQuery(async () => {
         bindHostEvents();
         mountMenuEntry();
         registerSlashCommand();
+        syncUpdateState();
 
         console.log(LOG_PREFIX, '已加载，从扩展菜单（魔杖图标）打开');
     } catch (error) {
