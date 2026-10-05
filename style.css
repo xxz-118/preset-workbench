@@ -1011,6 +1011,23 @@
     display: none !important;
 }
 
+/* 提示条的中性配色：用于展示当前版本的更新内容，而不是「有新版本」 */
+.pw-update-banner.pw-banner-neutral {
+    border-top-color: var(--SmartThemeBorderColor);
+    background: linear-gradient(180deg,
+            color-mix(in srgb, var(--SmartThemeBodyColor) 9%, transparent),
+            transparent);
+}
+
+.pw-update-banner.pw-banner-neutral .pw-update-badge {
+    color: var(--SmartThemeQuoteColor);
+    background-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 18%, transparent);
+}
+
+.pw-update-banner.pw-banner-neutral .pw-update-text b {
+    color: var(--SmartThemeQuoteColor);
+}
+
 /* 紧凑模式下的更新提示条 */
 .pw-window.pw-compact .pw-update-banner {
     padding: 10px 12px;
