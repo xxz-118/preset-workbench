@@ -81,7 +81,7 @@ const UPDATE_RELEASES_LIST_API = `https://api.github.com/repos/${UPDATE_REPO}/re
 const UPDATE_RELEASES_URL = `https://github.com/${UPDATE_REPO}/releases`;
 
 /** 本地版本兜底值；正常情况下读的是 manifest.json 的 version，两者需保持一致。 */
-const EXTENSION_VERSION_FALLBACK = '1.3.3';
+const EXTENSION_VERSION_FALLBACK = '1.3.4';
 
 /**
  * 调用酒馆更新接口时用的扩展名。
@@ -2080,8 +2080,61 @@ function mountMenuEntry(attempt = 0) {
     });
 }
 
-/** 注册 /pw 命令，作为键盘入口。 */
-function registerSlashCommand() {
+/**
+ * 运行时能力自检。
+ *
+ * 本扩展的三项硬依赖都从 SillyTavern 1.13.5 才具备：
+ *   - getContext().getPresetManager（1.12.14 起暴露给扩展）
+ *   - PresetManager.savePreset 的 { skipUpdate } 选项（1.13.5 起）
+ *   - 事件 event_types.PRESET_DELETED（1.13.5 起）
+ * 缺 skipUpdate 时「覆盖更新」会顺带把当前预设切走；缺 PRESET_DELETED 时
+ * regex 扩展与 Tavern Helper 收不到通知，它们按预设名存的索引会留下孤儿。
+ *
+ * 只检测与提示，不阻断加载 —— 旧版本上大部分操作仍然可用。
+ *
+ * @returns {string[]} 缺失项说明，空数组表示全部通过
+ */
+function checkHostCapabilities() {
+    const problems = [];
+
+    let context;
+    try {
+        context = ctx();
+    } catch (error) {
+        return [`无法获取酒馆上下文：${error?.message ?? error}`];
+    }
+
+    if (typeof context.getPresetManager !== 'function') {
+        problems.push('缺少 getContext().getPresetManager（需 1.12.14 及以上）');
+    }
+    if (!context.event_types?.PRESET_DELETED) {
+        problems.push('缺少 PRESET_DELETED 事件（需 1.13.5 及以上），删除预设时无法通知其他扩展清理关联索引');
+    }
+    if (typeof context.Popup?.show?.confirm !== 'function') {
+        problems.push('缺少 Popup（需 1.12.14 及以上），确认与输入对话框不可用');
+    }
+
+    // savePreset 是否支持 skipUpdate：它是解构参数，只能看函数源码。
+    // 这是整个扩展的核心机制，缺了它「覆盖更新」会顺带切换当前预设。
+    try {
+        const manager = context.getPresetManager?.('openai');
+        if (manager && typeof manager.savePreset === 'function') {
+            if (!manager.savePreset.toString().includes('skipUpdate')) {
+                problems.push('PresetManager.savePreset 不支持 skipUpdate（需 1.13.5 及以上），「覆盖更新」会顺带切换当前预设');
+            }
+        }
+    } catch (error) {
+        console.warn(LOG_PREFIX, 'savePreset 能力探测失败', error);
+    }
+
+    if (typeof context.getExtensionManifest !== 'function') {
+        console.info(LOG_PREFIX, '酒馆未提供 getExtensionManifest（1.18.0 及以上才有），版本号改用内置值');
+    }
+
+    return problems;
+}
+
+/** 注册 /pw 命令，作为键盘入口。 */function registerSlashCommand() {
     try {
         const context = ctx();
         const { SlashCommand, SlashCommandParser } = context;
@@ -2124,6 +2177,17 @@ window.jQuery(async () => {
         mountMenuEntry();
         registerSlashCommand();
         syncUpdateState();
+
+        const capabilityProblems = checkHostCapabilities();
+        if (capabilityProblems.length) {
+            console.warn(LOG_PREFIX, '酒馆版本能力自检未通过', capabilityProblems);
+            toastr.warning(
+                '当前酒馆版本可能过旧，建议升级到 <b>SillyTavern 1.13.5</b> 或更高：<br>'
+                + capabilityProblems.map((p) => `· ${escapeHtml(p)}`).join('<br>'),
+                '预设工作台',
+                { timeOut: 20000, extendedTimeOut: 10000 },
+            );
+        }
 
         console.log(LOG_PREFIX, '已加载，从扩展菜单（魔杖图标）打开');
     } catch (error) {

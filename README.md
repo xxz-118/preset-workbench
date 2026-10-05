@@ -162,12 +162,41 @@ git clone https://github.com/xxz-118/preset-workbench.git
 
 ---
 
-## 兼容性
+## 兼容性与版本要求
 
-- 目标：SillyTavern 1.12.0 及以上（`minimum_client_version`），实测于 **1.18.0**。
-- 只使用 `SillyTavern.getContext()` 暴露的公开接口与官方 HTTP 端点。只 import 了 `extensions.js` / `script.js` 的公开导出，与酒馆自带第三方扩展的惯例一致。
+**最低要求：SillyTavern 1.13.5。** 实测于 1.18.0。
+
+这不是估计值，是逐个 API 检出酒馆历史版本验证出来的。扩展依赖的每项能力及其首次出现版本：
+
+| 能力 | 用于 | 首次出现 |
+| --- | --- | --- |
+| `#extensionsMenu` 容器 | 浮窗的入口菜单项 | 1.9.0 |
+| `PresetManager` 类 / `getPresetList()` / `isKeyedApi()` | 全部操作的基础 | 1.10.0 |
+| `/api/presets/save`、`/api/presets/delete` | 写盘 / 删盘 | 1.11.0 |
+| `/api/extensions/update`、`/api/extensions/version` | 一键更新与更新检查 | 1.11.0 |
+| `/api/settings/get` 返回预设名单 | 列表数据源 | 1.11.8 |
+| `renderExtensionTemplateAsync` | 窗口模板 | 1.11.8 |
+| `getContext().getPresetManager` | 拿到预设管理器 | 1.12.14 |
+| `getContext().Popup` | 确认 / 输入对话框 | 1.12.14 |
+| `getContext().extensionSettings` | 清理按预设名的索引 | 1.12.14 |
+| `PresetManager.savePreset` 的 `skipUpdate` 选项 | **「不切换就能改」的核心** | **1.13.5** |
+| 事件 `PRESET_DELETED` | 删除后通知其他扩展清理 | **1.13.5** |
+| 事件 `PRESET_RENAMED_BEFORE` | 改名时同步正则授权 | **1.13.5** |
+| `getContext().getExtensionManifest` | 读取自身版本号 | 1.18.0（有内置兜底） |
+
+**1.13.5 这道门槛由 `skipUpdate` 和 `PRESET_DELETED` 决定，两项都不可替代**：
+
+- 没有 `skipUpdate`，「覆盖更新」会在保存后顺带把当前预设切走 —— 而这正是这个扩展要消除的行为。
+- 没有 `PRESET_DELETED`，regex 扩展与 Tavern Helper 收不到通知，它们按预设名单独存在 `settings.json` 里的索引（正则授权白名单、脚本启用列表）不会被清理。
+
+启动时会做一次**运行时能力自检**。若当前酒馆不满足，会弹出一条明确提示说明缺什么、需要哪个版本，而不是让功能静默地表现异常。`savePreset` 的检测是读函数源码完成的，因为 `skipUpdate` 是解构参数、无法直接探测。
+
+其它：
+
+- 只使用 `SillyTavern.getContext()` 暴露的公开接口与官方 HTTP 端点，只 import `extensions.js` / `script.js` 的公开导出。
 - 颜色全部派生自酒馆主题 CSS 变量，跟随亮色 / 暗色 / 自定义主题。
-- 无构建步骤，无外部依赖，无第三方网络请求（只访问酒馆自己的本地 API）。
+- 无构建步骤，无外部依赖。
+- 唯一的对外网络请求是检查更新时查一次 GitHub Release（同一版本 24 小时内一次），不发送任何本地数据；其余请求都指向你自己的酒馆。
 - 会同步进内存的只有预设数组与下拉框 option，不注入提示词、不注册宏、不挂全局工具。
 
 ---

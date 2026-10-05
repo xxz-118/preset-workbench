@@ -5,6 +5,17 @@ Release，因此这里写的内容就是用户在浮窗里点「更新内容」�
 
 ---
 
+## v1.3.4
+
+### 修正
+- **`minimum_client_version` 标错了。** 之前写的是 1.12.0，实测门槛是 **1.13.5**。这个数字是逐个 API 检出酒馆历史版本验证出来的，不是估计：`PresetManager.savePreset` 的 `skipUpdate` 选项与 `PRESET_DELETED` 事件都从 1.13.5 才有，而 `getContext().getPresetManager` 要到 1.12.14 才暴露给扩展。
+
+### 新增
+- **运行时能力自检。** 启动时检测当前酒馆是否具备三项硬依赖（`getPresetManager`、`savePreset` 的 `skipUpdate`、`PRESET_DELETED` 事件），不满足时弹出一条明确提示，说明缺什么、需要哪个版本，而不是让功能静默地表现异常。`savePreset` 的检测通过读函数源码完成 —— `skipUpdate` 是解构参数，无法直接探测。
+- README 增加版本要求对照表，逐项列出每个用到的酒馆能力及其首次出现版本。
+
+---
+
 ## v1.3.3
 
 ### 说明

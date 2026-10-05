@@ -4,8 +4,8 @@
     "js": "index.js",
     "css": "style.css",
     "author": "YG (@xxz-118)",
-    "version": "1.3.3",
-    "minimum_client_version": "1.12.0",
+    "version": "1.3.4",
+    "minimum_client_version": "1.13.5",
     "homePage": "https://github.com/xxz-118/preset-workbench",
     "auto_update": true,
     "description": "从扩展菜单打开的可拖动浮窗，集中管理全部预设：应用 / 覆盖更新 / 重命名 / 复制 / 导出 / 删除。每一行都有独立按钮，不需要先把某条预设切换成当前预设再修改。"
